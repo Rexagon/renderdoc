@@ -28,7 +28,7 @@
 template <>
 rdcstr DoStringise(const VulkanChunk &el)
 {
-  RDCCOMPILE_ASSERT((uint32_t)VulkanChunk::Max == 1237, "Chunks changed without updating names");
+  RDCCOMPILE_ASSERT((uint32_t)VulkanChunk::Max == 1244, "Chunks changed without updating names");
 
   BEGIN_ENUM_STRINGISE(VulkanChunk)
   {
@@ -266,6 +266,13 @@ rdcstr DoStringise(const VulkanChunk &el)
     STRINGISE_ENUM_CLASS(vkCmdSetDescriptorBufferOffsets2EXT)
     STRINGISE_ENUM_CLASS(vkCmdPushDescriptorSet2)
     STRINGISE_ENUM_CLASS(vkCmdPushDescriptorSetWithTemplate2)
+    STRINGISE_ENUM_CLASS(vkCmdPreprocessGeneratedCommandsEXT)
+    STRINGISE_ENUM_CLASS(vkCmdExecuteGeneratedCommandsEXT)
+    STRINGISE_ENUM_CLASS(vkCreateIndirectCommandsLayoutEXT)
+    STRINGISE_ENUM_CLASS(vkCreateIndirectExecutionSetEXT)
+    STRINGISE_ENUM_CLASS(vkUpdateIndirectExecutionSetPipelineEXT)
+    STRINGISE_ENUM_CLASS(vkUpdateIndirectExecutionSetShaderEXT)
+    STRINGISE_ENUM_CLASS_NAMED(vkCmdGeneratedCommandSubCommand, "Generated command sub-command")
     STRINGISE_ENUM_CLASS(vkCmdBeginCustomResolveEXT)
     STRINGISE_ENUM_CLASS_NAMED(SetCommandAnnotation, "Internal::SetCommandAnnotation");
     STRINGISE_ENUM_CLASS_NAMED(SetQueueAnnotation, "Internal::SetQueueAnnotation");
@@ -352,6 +359,8 @@ rdcstr DoStringise(const VkResourceType &el)
     STRINGISE_ENUM(eResSamplerConversion)
     STRINGISE_ENUM(eResAccelerationStructureKHR)
     STRINGISE_ENUM(eResShaderEXT)
+    STRINGISE_ENUM(eResIndirectCommandsLayoutEXT)
+    STRINGISE_ENUM(eResIndirectExecutionSetEXT)
   }
   END_ENUM_STRINGISE();
 }

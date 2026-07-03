@@ -1406,6 +1406,13 @@ enum class VulkanChunk : uint32_t
   vkCmdSetDescriptorBufferOffsets2EXT,
   vkCmdPushDescriptorSet2,
   vkCmdPushDescriptorSetWithTemplate2,
+  vkCmdPreprocessGeneratedCommandsEXT,
+  vkCmdExecuteGeneratedCommandsEXT,
+  vkCreateIndirectCommandsLayoutEXT,
+  vkCreateIndirectExecutionSetEXT,
+  vkUpdateIndirectExecutionSetPipelineEXT,
+  vkUpdateIndirectExecutionSetShaderEXT,
+  vkCmdGeneratedCommandSubCommand,
   vkCmdEndRendering2EXT,
   SetQueueAnnotation,
   SetCommandAnnotation,
@@ -1450,7 +1457,9 @@ DECLARE_REFLECTION_ENUM(VulkanChunk);
   SERIALISE_HANDLE(VkDescriptorUpdateTemplate) \
   SERIALISE_HANDLE(VkSamplerYcbcrConversion)   \
   SERIALISE_HANDLE(VkAccelerationStructureKHR) \
-  SERIALISE_HANDLE(VkShaderEXT)
+  SERIALISE_HANDLE(VkShaderEXT)                \
+  SERIALISE_HANDLE(VkIndirectCommandsLayoutEXT) \
+  SERIALISE_HANDLE(VkIndirectExecutionSetEXT)
 
 #define SERIALISE_HANDLE(type) DECLARE_REFLECTION_STRUCT(type)
 

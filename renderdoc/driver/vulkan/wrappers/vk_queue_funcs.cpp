@@ -623,6 +623,216 @@ bool WrappedVulkan::PatchIndirectDraw(size_t drawIndex, uint32_t paramStride,
   return valid;
 }
 
+static void AddGeneratedCommandBufferUsage(WrappedVulkan *driver, VulkanActionTreeNode &node,
+                                           VkDeviceAddress address, ResourceUsage usage)
+{
+  if(address == 0)
+    return;
+
+  ResourceId id;
+  uint64_t offset = 0;
+  driver->GetResIDFromAddr(address, id, offset);
+
+  if(id == ResourceId())
+    driver->GetResIDFromAddr(address | (0xffffULL << 48), id, offset);
+
+  if(id != ResourceId())
+    node.resourceUsage.push_back(make_rdcpair(id, EventUsage(node.action.eventId, usage)));
+}
+
+static VkDeviceSize GeneratedCommandStride(const VkGeneratedCommandsLayoutData &layout)
+{
+  VkDeviceSize stride = layout.indirectStride;
+
+  for(const VkGeneratedCommandsLayoutTokenData &token : layout.tokens)
+  {
+    VkDeviceSize tokenSize = 0;
+
+    if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT)
+      tokenSize = token.pushRange.size;
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT)
+      tokenSize = sizeof(VkBindIndexBufferIndirectCommandEXT);
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT)
+      tokenSize = sizeof(VkBindVertexBufferIndirectCommandEXT);
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_EXT)
+      tokenSize = sizeof(VkDrawIndexedIndirectCommand);
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_EXT)
+      tokenSize = sizeof(VkDrawIndirectCommand);
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DISPATCH_EXT)
+      tokenSize = sizeof(VkDispatchIndirectCommand);
+
+    stride = RDCMAX(stride, VkDeviceSize(token.offset) + tokenSize);
+  }
+
+  return stride;
+}
+
+static ActionFlags GeneratedCommandActionFlags(VkGeneratedCommandsActionType actionType)
+{
+  if(actionType == VkGeneratedCommandsActionType::Draw)
+    return ActionFlags::Drawcall | ActionFlags::Instanced | ActionFlags::Indirect;
+  if(actionType == VkGeneratedCommandsActionType::DrawIndexed)
+    return ActionFlags::Drawcall | ActionFlags::Instanced | ActionFlags::Indexed |
+           ActionFlags::Indirect;
+  if(actionType == VkGeneratedCommandsActionType::Dispatch)
+    return ActionFlags::Dispatch | ActionFlags::Indirect;
+
+  return ActionFlags::Indirect;
+}
+
+static const char *GeneratedCommandActionName(VkGeneratedCommandsActionType actionType)
+{
+  if(actionType == VkGeneratedCommandsActionType::Draw)
+    return "Draw";
+  if(actionType == VkGeneratedCommandsActionType::DrawIndexed)
+    return "DrawIndexed";
+  if(actionType == VkGeneratedCommandsActionType::Dispatch)
+    return "Dispatch";
+
+  return "Unsupported";
+}
+
+static bool PatchGeneratedCommand(WrappedVulkan *driver, size_t sequenceIndex,
+                                  const VkGeneratedCommandsLayoutData &layout,
+                                  VulkanActionTreeNode &node, byte *seqBase, byte *argend,
+                                  SDChunk *chunk)
+{
+  bool valid = false;
+  node.action.drawIndex = (uint32_t)sequenceIndex;
+
+  bool hasVertexToken = false;
+  bool hasIndexToken = false;
+  for(const VkGeneratedCommandsLayoutTokenData &token : layout.tokens)
+  {
+    hasVertexToken |= token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT;
+    hasIndexToken |= token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT;
+  }
+
+  for(size_t i = node.resourceUsage.size(); i > 0; i--)
+  {
+    ResourceUsage usage = node.resourceUsage[i - 1].second.usage;
+    if((hasVertexToken && usage == ResourceUsage::VertexBuffer) ||
+       (hasIndexToken && usage == ResourceUsage::IndexBuffer))
+      node.resourceUsage.erase(i - 1);
+  }
+
+  if(chunk)
+  {
+    if(SDObject *seq = chunk->FindChild("sequenceIndex"))
+      seq->data.basic.u = sequenceIndex;
+
+    if(SDObject *offset = chunk->FindChild("offset"))
+      offset->data.basic.u += sequenceIndex * GeneratedCommandStride(layout);
+  }
+
+  for(const VkGeneratedCommandsLayoutTokenData &token : layout.tokens)
+  {
+    byte *tokenPtr = NULL;
+    if(seqBase && argend && token.offset <= (uint64_t)(argend - seqBase))
+      tokenPtr = seqBase + token.offset;
+
+    if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT)
+    {
+      if(tokenPtr && tokenPtr + sizeof(VkBindVertexBufferIndirectCommandEXT) <= argend)
+      {
+        VkBindVertexBufferIndirectCommandEXT *arg =
+            (VkBindVertexBufferIndirectCommandEXT *)tokenPtr;
+        AddGeneratedCommandBufferUsage(driver, node, arg->bufferAddress, ResourceUsage::VertexBuffer);
+      }
+    }
+    else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT)
+    {
+      if(tokenPtr && tokenPtr + sizeof(VkBindIndexBufferIndirectCommandEXT) <= argend)
+      {
+        VkBindIndexBufferIndirectCommandEXT *arg = (VkBindIndexBufferIndirectCommandEXT *)tokenPtr;
+        AddGeneratedCommandBufferUsage(driver, node, arg->bufferAddress, ResourceUsage::IndexBuffer);
+      }
+    }
+  }
+
+  if(layout.actionTokenIndex >= layout.tokens.size())
+    return false;
+
+  const VkGeneratedCommandsLayoutTokenData &actionToken = layout.tokens[layout.actionTokenIndex];
+  byte *argptr = NULL;
+  if(seqBase && argend && actionToken.offset <= (uint64_t)(argend - seqBase))
+    argptr = seqBase + actionToken.offset;
+
+  if(layout.actionType == VkGeneratedCommandsActionType::Draw)
+  {
+    if(argptr && argptr + sizeof(VkDrawIndirectCommand) <= argend)
+    {
+      VkDrawIndirectCommand *arg = (VkDrawIndirectCommand *)argptr;
+
+      node.action.numIndices = arg->vertexCount;
+      node.action.numInstances = arg->instanceCount;
+      node.action.vertexOffset = arg->firstVertex;
+      node.action.instanceOffset = arg->firstInstance;
+
+      valid = true;
+    }
+  }
+  else if(layout.actionType == VkGeneratedCommandsActionType::DrawIndexed)
+  {
+    if(argptr && argptr + sizeof(VkDrawIndexedIndirectCommand) <= argend)
+    {
+      VkDrawIndexedIndirectCommand *arg = (VkDrawIndexedIndirectCommand *)argptr;
+
+      node.action.numIndices = arg->indexCount;
+      node.action.numInstances = arg->instanceCount;
+      node.action.baseVertex = arg->vertexOffset;
+      node.action.indexOffset = arg->firstIndex;
+      node.action.instanceOffset = arg->firstInstance;
+
+      valid = true;
+    }
+  }
+  else if(layout.actionType == VkGeneratedCommandsActionType::Dispatch)
+  {
+    if(argptr && argptr + sizeof(VkDispatchIndirectCommand) <= argend)
+    {
+      VkDispatchIndirectCommand *arg = (VkDispatchIndirectCommand *)argptr;
+
+      node.action.dispatchDimension[0] = arg->x;
+      node.action.dispatchDimension[1] = arg->y;
+      node.action.dispatchDimension[2] = arg->z;
+
+      valid = true;
+    }
+  }
+
+  if(valid && chunk)
+  {
+    SDObject *command = chunk->FindChild("command");
+
+    if(command)
+    {
+      if(SDObject *sub = command->FindChild("vertexCount"))
+        sub->data.basic.u = node.action.numIndices;
+      if(SDObject *sub = command->FindChild("indexCount"))
+        sub->data.basic.u = node.action.numIndices;
+      if(SDObject *sub = command->FindChild("instanceCount"))
+        sub->data.basic.u = node.action.numInstances;
+      if(SDObject *sub = command->FindChild("firstVertex"))
+        sub->data.basic.u = node.action.vertexOffset;
+      if(SDObject *sub = command->FindChild("vertexOffset"))
+        sub->data.basic.u = node.action.baseVertex;
+      if(SDObject *sub = command->FindChild("firstIndex"))
+        sub->data.basic.u = node.action.indexOffset;
+      if(SDObject *sub = command->FindChild("firstInstance"))
+        sub->data.basic.u = node.action.instanceOffset;
+      if(SDObject *sub = command->FindChild("groupCountX"))
+        sub->data.basic.u = node.action.dispatchDimension[0];
+      if(SDObject *sub = command->FindChild("groupCountY"))
+        sub->data.basic.u = node.action.dispatchDimension[1];
+      if(SDObject *sub = command->FindChild("groupCountZ"))
+        sub->data.basic.u = node.action.dispatchDimension[2];
+    }
+  }
+
+  return valid;
+}
+
 void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
 {
   SDObject *localAnnotations = NULL;
@@ -671,6 +881,116 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
       n.action.dispatchDimension[0] = args->x;
       n.action.dispatchDimension[1] = args->y;
       n.action.dispatchDimension[2] = args->z;
+    }
+    else if(n.generatedPatch.layout != ResourceId())
+    {
+      VkGeneratedCommandsLayoutData layout;
+      if(m_IndirectCommandsLayoutsEXT.find(n.generatedPatch.layout) !=
+         m_IndirectCommandsLayoutsEXT.end())
+        layout = m_IndirectCommandsLayoutsEXT[n.generatedPatch.layout];
+
+      bytebuf argbuf;
+      if(n.generatedPatch.buf != VK_NULL_HANDLE)
+        GetDebugManager()->GetBufferData(GetResID(n.generatedPatch.buf), 0, 0, argbuf);
+
+      byte *ptr = argbuf.size() ? argbuf.begin() : NULL;
+      byte *end = argbuf.size() ? argbuf.end() : NULL;
+
+      uint32_t sequenceCount = n.generatedPatch.count;
+      if(n.generatedPatch.hasCount)
+      {
+        if(argbuf.size() >= 16)
+        {
+          uint32_t *count = (uint32_t *)end;
+          count -= 4;
+          sequenceCount = *count;
+        }
+        else
+        {
+          RDCERR("Couldn't get generated command sequence count");
+        }
+
+        if(sequenceCount > n.generatedPatch.count)
+        {
+          RDCERR("Generated command sequence count higher than maxSequenceCount, clamping");
+          sequenceCount = n.generatedPatch.count;
+        }
+      }
+
+      int32_t eidShift = int32_t(sequenceCount) - int32_t(n.generatedPatch.count);
+      totalEIDShift += eidShift;
+
+      if(eidShift != 0)
+      {
+        uint32_t popEvent = n.action.eventId + n.generatedPatch.count + 1;
+        ShiftSuccessiveCommandNodes(popEvent, eidShift);
+
+        size_t firstShiftedNode = i + n.generatedPatch.count + 1;
+        for(size_t j = firstShiftedNode; j < cmdBufNodes.size(); j++)
+        {
+          cmdBufNodes[j].action.eventId += eidShift;
+          cmdBufNodes[j].action.actionId += eidShift;
+
+          for(APIEvent &ev : cmdBufNodes[j].action.events)
+            ev.eventId += eidShift;
+
+          for(rdcpair<ResourceId, EventUsage> &use : cmdBufNodes[j].resourceUsage)
+            use.second.eventId += eidShift;
+        }
+
+        for(size_t j = 0; j < cmdBufInfo.debugMessages.size(); j++)
+        {
+          if(cmdBufInfo.debugMessages[j].eventId >= popEvent)
+            cmdBufInfo.debugMessages[j].eventId += eidShift;
+        }
+
+        if(sequenceCount < n.generatedPatch.count)
+          cmdBufNodes.erase(i + sequenceCount + 1, n.generatedPatch.count - sequenceCount);
+      }
+
+      rdcstr actionName = "vkCmdExecuteGeneratedCommandsEXT";
+      n.action.customName = StringFormat::Fmt("%s(%s <%u>)", actionName.c_str(),
+                                              GeneratedCommandActionName(layout.actionType),
+                                              sequenceCount);
+
+      if(sequenceCount == 0)
+        n.action.flags |= GeneratedCommandActionFlags(layout.actionType);
+
+      VkDeviceSize stride = GeneratedCommandStride(layout);
+      if(stride == 0)
+        stride = n.generatedPatch.stride;
+
+      for(size_t j = 0; j < (size_t)sequenceCount && i + j + 1 < cmdBufNodes.size(); j++)
+      {
+        VulkanActionTreeNode &n2 = cmdBufNodes[i + j + 1];
+
+        SDChunk *chunk = NULL;
+        if(!n2.action.events.empty())
+          chunk = m_StructuredFile->chunks[n2.action.events.back().chunkIndex];
+
+        byte *seqBase = NULL;
+        if(ptr && end && j * stride <= (uint64_t)(end - ptr))
+          seqBase = ptr + j * stride;
+        bool valid = PatchGeneratedCommand(this, j, layout, n2, seqBase, end, chunk);
+
+        if(layout.actionType == VkGeneratedCommandsActionType::Dispatch)
+        {
+          if(valid)
+            n2.action.customName = StringFormat::Fmt(
+                "%s[%zu](<%u, %u, %u>)", actionName.c_str(), j, n2.action.dispatchDimension[0],
+                n2.action.dispatchDimension[1], n2.action.dispatchDimension[2]);
+          else
+            n2.action.customName = StringFormat::Fmt("%s[%zu](<?, ?, ?>)", actionName.c_str(), j);
+        }
+        else
+        {
+          if(valid)
+            n2.action.customName = StringFormat::Fmt("%s[%zu](<%u, %u>)", actionName.c_str(), j,
+                                                     n2.action.numIndices, n2.action.numInstances);
+          else
+            n2.action.customName = StringFormat::Fmt("%s[%zu](<?, ?>)", actionName.c_str(), j);
+        }
+      }
     }
     else if(n.indirectPatch.type == VkIndirectPatchType::DrawIndirectByteCount ||
             n.indirectPatch.type == VkIndirectPatchType::DrawIndirect ||

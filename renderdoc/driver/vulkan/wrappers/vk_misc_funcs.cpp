@@ -706,6 +706,22 @@ bool WrappedVulkan::ReleaseResource(WrappedVkRes *res)
       vt->DestroyShaderEXT(Unwrap(dev), real, NULL);
       break;
     }
+    case eResIndirectCommandsLayoutEXT:
+    {
+      VkIndirectCommandsLayoutEXT real = nondisp->real.As<VkIndirectCommandsLayoutEXT>();
+      GetResourceManager()->ReleaseWrappedResource(VkIndirectCommandsLayoutEXT(handle));
+      if(vt->DestroyIndirectCommandsLayoutEXT)
+        vt->DestroyIndirectCommandsLayoutEXT(Unwrap(dev), real, NULL);
+      break;
+    }
+    case eResIndirectExecutionSetEXT:
+    {
+      VkIndirectExecutionSetEXT real = nondisp->real.As<VkIndirectExecutionSetEXT>();
+      GetResourceManager()->ReleaseWrappedResource(VkIndirectExecutionSetEXT(handle));
+      if(vt->DestroyIndirectExecutionSetEXT)
+        vt->DestroyIndirectExecutionSetEXT(Unwrap(dev), real, NULL);
+      break;
+    }
   }
 
   return true;

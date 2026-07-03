@@ -85,6 +85,8 @@ enum VkResourceType
   eResSamplerConversion,
   eResAccelerationStructureKHR,
   eResShaderEXT,
+  eResIndirectCommandsLayoutEXT,
+  eResIndirectExecutionSetEXT,
 };
 
 DECLARE_REFLECTION_ENUM(VkResourceType);
@@ -601,6 +603,32 @@ struct WrappedVkShaderEXT : WrappedVkNonDispRes
     TypeEnum = eResShaderEXT,
   };
 };
+struct WrappedVkIndirectCommandsLayoutEXT : WrappedVkNonDispRes
+{
+  WrappedVkIndirectCommandsLayoutEXT(VkIndirectCommandsLayoutEXT obj, ResourceId objId)
+      : WrappedVkNonDispRes(obj, objId)
+  {
+  }
+  typedef VkIndirectCommandsLayoutEXT InnerType;
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkIndirectCommandsLayoutEXT);
+  enum
+  {
+    TypeEnum = eResIndirectCommandsLayoutEXT,
+  };
+};
+struct WrappedVkIndirectExecutionSetEXT : WrappedVkNonDispRes
+{
+  WrappedVkIndirectExecutionSetEXT(VkIndirectExecutionSetEXT obj, ResourceId objId)
+      : WrappedVkNonDispRes(obj, objId)
+  {
+  }
+  typedef VkIndirectExecutionSetEXT InnerType;
+  ALLOCATE_WITH_WRAPPED_POOL(WrappedVkIndirectExecutionSetEXT);
+  enum
+  {
+    TypeEnum = eResIndirectExecutionSetEXT,
+  };
+};
 
 // VkDisplayKHR and VkDisplayModeKHR are both UNWRAPPED because there's no need to wrap them.
 // The only thing we need to wrap VkSurfaceKHR for is to get back the window from it later.
@@ -705,6 +733,8 @@ UNWRAP_NONDISP_HELPER(VkDescriptorUpdateTemplate)
 UNWRAP_NONDISP_HELPER(VkSamplerYcbcrConversion)
 UNWRAP_NONDISP_HELPER(VkAccelerationStructureKHR)
 UNWRAP_NONDISP_HELPER(VkShaderEXT)
+UNWRAP_NONDISP_HELPER(VkIndirectCommandsLayoutEXT)
+UNWRAP_NONDISP_HELPER(VkIndirectExecutionSetEXT)
 
 // VkDisplayKHR and VkDisplayModeKHR are both UNWRAPPED because there's no need to wrap them.
 // The only thing we need to wrap VkSurfaceKHR for is to get back the window from it later.

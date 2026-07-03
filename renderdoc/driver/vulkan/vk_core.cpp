@@ -1162,6 +1162,10 @@ static const VkExtensionProperties supportedExtensions[] = {
         VK_EXT_DESCRIPTOR_INDEXING_SPEC_VERSION,
     },
     {
+        VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME,
+        VK_EXT_DEVICE_GENERATED_COMMANDS_SPEC_VERSION,
+    },
+    {
         VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME,
         VK_EXT_DIRECT_MODE_DISPLAY_SPEC_VERSION,
     },
@@ -3960,6 +3964,12 @@ RDResult WrappedVulkan::ContextReplayLog(CaptureState readType, uint32_t startEv
               type = VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR;
               break;
             case eResShaderEXT: type = VK_OBJECT_TYPE_SHADER_EXT; break;
+            case eResIndirectCommandsLayoutEXT:
+              type = VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_EXT;
+              break;
+            case eResIndirectExecutionSetEXT:
+              type = VK_OBJECT_TYPE_INDIRECT_EXECUTION_SET_EXT;
+              break;
           }
 
           if(type != VK_OBJECT_TYPE_UNKNOWN && type != VK_OBJECT_TYPE_PHYSICAL_DEVICE)
@@ -4903,6 +4913,26 @@ bool WrappedVulkan::ProcessChunk(ReadSerialiser &ser, VulkanChunk chunk)
       return Serialise_vkCmdBindDescriptorBufferEmbeddedSamplersEXT(
           ser, VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_MAX_ENUM, VK_NULL_HANDLE, 0);
 
+    case VulkanChunk::vkCmdPreprocessGeneratedCommandsEXT:
+      return Serialise_vkCmdPreprocessGeneratedCommandsEXT(ser, VK_NULL_HANDLE, NULL,
+                                                           VK_NULL_HANDLE);
+    case VulkanChunk::vkCmdExecuteGeneratedCommandsEXT:
+      return Serialise_vkCmdExecuteGeneratedCommandsEXT(ser, VK_NULL_HANDLE, VK_FALSE, NULL);
+    case VulkanChunk::vkCreateIndirectCommandsLayoutEXT:
+      return Serialise_vkCreateIndirectCommandsLayoutEXT(ser, VK_NULL_HANDLE, NULL, NULL, NULL);
+    case VulkanChunk::vkCreateIndirectExecutionSetEXT:
+      return Serialise_vkCreateIndirectExecutionSetEXT(ser, VK_NULL_HANDLE, NULL, NULL, NULL);
+    case VulkanChunk::vkUpdateIndirectExecutionSetPipelineEXT:
+      return Serialise_vkUpdateIndirectExecutionSetPipelineEXT(ser, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                                               0, NULL);
+    case VulkanChunk::vkUpdateIndirectExecutionSetShaderEXT:
+      return Serialise_vkUpdateIndirectExecutionSetShaderEXT(ser, VK_NULL_HANDLE, VK_NULL_HANDLE, 0,
+                                                             NULL);
+    case VulkanChunk::vkCmdGeneratedCommandSubCommand:
+      // this is a fake chunk generated at runtime as part of device generated command inspection.
+      // Just in case it gets exported and imported, completely ignore it.
+      return true;
+
     case VulkanChunk::vkCmdBindShadersEXT:
       return Serialise_vkCmdBindShadersEXT(ser, VK_NULL_HANDLE, 0, NULL, NULL);
     case VulkanChunk::vkCreateShadersEXT:
@@ -5191,8 +5221,9 @@ void WrappedVulkan::ReplayLog(uint32_t startEventID, uint32_t endEventID, Replay
         if(rpUnneeded)
         {
           APIEvent ev = GetEvent(endEventID);
-          if(m_StructuredFile->chunks[ev.chunkIndex]->metadata.chunkID ==
-             (uint32_t)VulkanChunk::vkCmdIndirectSubCommand)
+          uint32_t chunkID = m_StructuredFile->chunks[ev.chunkIndex]->metadata.chunkID;
+          if(chunkID == (uint32_t)VulkanChunk::vkCmdIndirectSubCommand ||
+             chunkID == (uint32_t)VulkanChunk::vkCmdGeneratedCommandSubCommand)
             rpUnneeded = false;
         }
 

@@ -10479,6 +10479,1071 @@ void WrappedVulkan::vkCmdBeginCustomResolveEXT(
   }
 }
 
+static VkGeneratedCommandsActionType ActionTypeForDGCToken(VkIndirectCommandsTokenTypeEXT type)
+{
+  if(type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_EXT)
+    return VkGeneratedCommandsActionType::Draw;
+  if(type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_EXT)
+    return VkGeneratedCommandsActionType::DrawIndexed;
+  if(type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_DISPATCH_EXT)
+    return VkGeneratedCommandsActionType::Dispatch;
+
+  return VkGeneratedCommandsActionType::Unknown;
+}
+
+static VkDeviceSize SizeForDGCToken(const VkGeneratedCommandsLayoutTokenData &token)
+{
+  switch(token.type)
+  {
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT: return token.pushRange.size;
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT:
+      return sizeof(VkBindIndexBufferIndirectCommandEXT);
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT:
+      return sizeof(VkBindVertexBufferIndirectCommandEXT);
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_EXT:
+      return sizeof(VkDrawIndexedIndirectCommand);
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_EXT: return sizeof(VkDrawIndirectCommand);
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DISPATCH_EXT: return sizeof(VkDispatchIndirectCommand);
+    default: break;
+  }
+
+  return 0;
+}
+
+static VkDeviceSize MinimumDGCStride(const VkGeneratedCommandsLayoutData &layout)
+{
+  VkDeviceSize stride = layout.indirectStride;
+
+  for(const VkGeneratedCommandsLayoutTokenData &token : layout.tokens)
+    stride = RDCMAX(stride, VkDeviceSize(token.offset) + SizeForDGCToken(token));
+
+  return stride;
+}
+
+static ActionFlags ActionFlagsForDGCAction(VkGeneratedCommandsActionType actionType)
+{
+  switch(actionType)
+  {
+    case VkGeneratedCommandsActionType::Draw:
+      return ActionFlags::Drawcall | ActionFlags::Instanced | ActionFlags::Indirect;
+    case VkGeneratedCommandsActionType::DrawIndexed:
+      return ActionFlags::Drawcall | ActionFlags::Instanced | ActionFlags::Indexed |
+             ActionFlags::Indirect;
+    case VkGeneratedCommandsActionType::Dispatch:
+      return ActionFlags::Dispatch | ActionFlags::Indirect;
+    default: break;
+  }
+
+  return ActionFlags::Indirect;
+}
+
+static void MarkDGCAddressBuffer(WrappedVulkan *driver, VkResourceRecord *record,
+                                 VkDeviceAddress address, VkDeviceSize size, FrameRefType refType)
+{
+  if(address == 0 || size == 0)
+    return;
+
+  ResourceId id;
+  uint64_t offset = 0;
+  driver->GetResIDFromAddr(address, id, offset);
+
+  if(id == ResourceId())
+    driver->GetResIDFromAddr(address | (0xffffULL << 48), id, offset);
+
+  if(id == ResourceId())
+  {
+    RDCWARN("Couldn't resolve device generated commands address 0x%llx",
+            (unsigned long long)address);
+    return;
+  }
+
+  VkBuffer buffer = driver->GetResourceManager()->GetHandle<VkBuffer>(id);
+  record->MarkBufferFrameReferenced(GetRecord(buffer), offset, size, refType);
+}
+
+static void FillDGCLayoutData(VkGeneratedCommandsLayoutData &layout,
+                              const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo)
+{
+  layout = {};
+
+  if(pCreateInfo == NULL)
+    return;
+
+  layout.flags = pCreateInfo->flags;
+  layout.shaderStages = pCreateInfo->shaderStages;
+  layout.indirectStride = pCreateInfo->indirectStride;
+  layout.pipelineLayout = GetResID(pCreateInfo->pipelineLayout);
+  layout.tokens.resize(pCreateInfo->tokenCount);
+
+  for(uint32_t i = 0; i < pCreateInfo->tokenCount; i++)
+  {
+    const VkIndirectCommandsLayoutTokenEXT &src = pCreateInfo->pTokens[i];
+    VkGeneratedCommandsLayoutTokenData &dst = layout.tokens[i];
+
+    dst.type = src.type;
+    dst.offset = src.offset;
+
+    if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT && src.data.pPushConstant)
+      dst.pushRange = src.data.pPushConstant->updateRange;
+    else if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT &&
+            src.data.pVertexBuffer)
+      dst.vertexBindingUnit = src.data.pVertexBuffer->vertexBindingUnit;
+    else if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT && src.data.pIndexBuffer)
+      dst.indexMode = src.data.pIndexBuffer->mode;
+    else if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_EXECUTION_SET_EXT &&
+            src.data.pExecutionSet)
+    {
+      dst.executionSetType = src.data.pExecutionSet->type;
+      dst.executionSetStages = src.data.pExecutionSet->shaderStages;
+    }
+
+    VkGeneratedCommandsActionType actionType = ActionTypeForDGCToken(src.type);
+    if(actionType != VkGeneratedCommandsActionType::Unknown &&
+       layout.actionType == VkGeneratedCommandsActionType::Unknown)
+    {
+      layout.actionType = actionType;
+      layout.actionTokenIndex = i;
+    }
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCreateIndirectCommandsLayoutEXT(
+    SerialiserType &ser, VkDevice device, const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkIndirectCommandsLayoutEXT *pIndirectCommandsLayout)
+{
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT_LOCAL(Flags, pCreateInfo ? pCreateInfo->flags : 0).Important();
+  SERIALISE_ELEMENT_LOCAL(ShaderStages, pCreateInfo ? pCreateInfo->shaderStages : 0).Important();
+  SERIALISE_ELEMENT_LOCAL(IndirectStride, pCreateInfo ? pCreateInfo->indirectStride : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(PipelineLayout,
+                          pCreateInfo ? pCreateInfo->pipelineLayout : VK_NULL_HANDLE)
+      .Important();
+  SERIALISE_ELEMENT_LOCAL(TokenCount, pCreateInfo ? pCreateInfo->tokenCount : 0U);
+
+  rdcarray<uint32_t> tokenTypesStorage, tokenOffsetsStorage, pushStageStorage, pushOffsetStorage;
+  rdcarray<uint32_t> pushSizeStorage, vertexBindingStorage, indexModeStorage, execSetTypeStorage;
+  rdcarray<uint32_t> execStageStorage;
+
+  if(ser.IsWriting())
+  {
+    tokenTypesStorage.resize(TokenCount);
+    tokenOffsetsStorage.resize(TokenCount);
+    pushStageStorage.resize(TokenCount);
+    pushOffsetStorage.resize(TokenCount);
+    pushSizeStorage.resize(TokenCount);
+    vertexBindingStorage.resize(TokenCount);
+    indexModeStorage.resize(TokenCount);
+    execSetTypeStorage.resize(TokenCount);
+    execStageStorage.resize(TokenCount);
+
+    for(uint32_t i = 0; i < TokenCount; i++)
+    {
+      const VkIndirectCommandsLayoutTokenEXT &token = pCreateInfo->pTokens[i];
+      tokenTypesStorage[i] = (uint32_t)token.type;
+      tokenOffsetsStorage[i] = token.offset;
+      pushStageStorage[i] = 0;
+      pushOffsetStorage[i] = 0;
+      pushSizeStorage[i] = 0;
+      vertexBindingStorage[i] = 0;
+      indexModeStorage[i] = VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT;
+      execSetTypeStorage[i] = VK_INDIRECT_EXECUTION_SET_INFO_TYPE_MAX_ENUM_EXT;
+      execStageStorage[i] = 0;
+
+      if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT &&
+         token.data.pPushConstant)
+      {
+        pushStageStorage[i] = token.data.pPushConstant->updateRange.stageFlags;
+        pushOffsetStorage[i] = token.data.pPushConstant->updateRange.offset;
+        pushSizeStorage[i] = token.data.pPushConstant->updateRange.size;
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT &&
+              token.data.pVertexBuffer)
+      {
+        vertexBindingStorage[i] = token.data.pVertexBuffer->vertexBindingUnit;
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT &&
+              token.data.pIndexBuffer)
+      {
+        indexModeStorage[i] = token.data.pIndexBuffer->mode;
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_EXECUTION_SET_EXT &&
+              token.data.pExecutionSet)
+      {
+        execSetTypeStorage[i] = token.data.pExecutionSet->type;
+        execStageStorage[i] = token.data.pExecutionSet->shaderStages;
+      }
+    }
+  }
+
+  const uint32_t *TokenTypes = tokenTypesStorage.data();
+  const uint32_t *TokenOffsets = tokenOffsetsStorage.data();
+  const uint32_t *PushStageFlags = pushStageStorage.data();
+  const uint32_t *PushOffsets = pushOffsetStorage.data();
+  const uint32_t *PushSizes = pushSizeStorage.data();
+  const uint32_t *VertexBindings = vertexBindingStorage.data();
+  const uint32_t *IndexModes = indexModeStorage.data();
+  const uint32_t *ExecutionSetTypes = execSetTypeStorage.data();
+  const uint32_t *ExecutionSetStages = execStageStorage.data();
+
+  SERIALISE_ELEMENT_ARRAY(TokenTypes, TokenCount).Important();
+  SERIALISE_ELEMENT_ARRAY(TokenOffsets, TokenCount).OffsetOrSize();
+  SERIALISE_ELEMENT_ARRAY(PushStageFlags, TokenCount);
+  SERIALISE_ELEMENT_ARRAY(PushOffsets, TokenCount).OffsetOrSize();
+  SERIALISE_ELEMENT_ARRAY(PushSizes, TokenCount).OffsetOrSize();
+  SERIALISE_ELEMENT_ARRAY(VertexBindings, TokenCount);
+  SERIALISE_ELEMENT_ARRAY(IndexModes, TokenCount);
+  SERIALISE_ELEMENT_ARRAY(ExecutionSetTypes, TokenCount);
+  SERIALISE_ELEMENT_ARRAY(ExecutionSetStages, TokenCount);
+
+  SERIALISE_ELEMENT_OPT(pAllocator).Hidden();
+  SERIALISE_ELEMENT_LOCAL(IndirectCommandsLayout,
+                          GetResID(pIndirectCommandsLayout ? *pIndirectCommandsLayout
+                                                           : VK_NULL_HANDLE))
+      .TypedAs("VkIndirectCommandsLayoutEXT"_lit);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    VkIndirectCommandsLayoutEXT layoutHandle =
+        GetResourceManager()->CreateDeferredHandle<VkIndirectCommandsLayoutEXT>();
+
+    ResourceId live = GetResourceManager()->WrapResource(IndirectCommandsLayout, Unwrap(device),
+                                                         layoutHandle);
+
+    AddResource(IndirectCommandsLayout, ResourceType::ShaderBinding, "Indirect Commands Layout");
+    DerivedResource(device, IndirectCommandsLayout);
+    if(PipelineLayout != VK_NULL_HANDLE)
+      DerivedResource(PipelineLayout, IndirectCommandsLayout);
+
+    VkGeneratedCommandsLayoutData layout;
+    layout.flags = Flags;
+    layout.shaderStages = ShaderStages;
+    layout.indirectStride = IndirectStride;
+    layout.pipelineLayout = GetResID(PipelineLayout);
+    layout.tokens.resize(TokenCount);
+
+    for(uint32_t i = 0; i < TokenCount; i++)
+    {
+      VkGeneratedCommandsLayoutTokenData &token = layout.tokens[i];
+      token.type = (VkIndirectCommandsTokenTypeEXT)TokenTypes[i];
+      token.offset = TokenOffsets[i];
+      token.pushRange.stageFlags = PushStageFlags[i];
+      token.pushRange.offset = PushOffsets[i];
+      token.pushRange.size = PushSizes[i];
+      token.vertexBindingUnit = VertexBindings[i];
+      token.indexMode = (VkIndirectCommandsInputModeFlagBitsEXT)IndexModes[i];
+      token.executionSetType = (VkIndirectExecutionSetInfoTypeEXT)ExecutionSetTypes[i];
+      token.executionSetStages = ExecutionSetStages[i];
+
+      VkGeneratedCommandsActionType actionType = ActionTypeForDGCToken(token.type);
+      if(actionType != VkGeneratedCommandsActionType::Unknown &&
+         layout.actionType == VkGeneratedCommandsActionType::Unknown)
+      {
+        layout.actionType = actionType;
+        layout.actionTokenIndex = i;
+      }
+    }
+
+    m_IndirectCommandsLayoutsEXT[live] = layout;
+  }
+
+  return true;
+}
+
+VkResult WrappedVulkan::vkCreateIndirectCommandsLayoutEXT(
+    VkDevice device, const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *, VkIndirectCommandsLayoutEXT *pIndirectCommandsLayout)
+{
+  VkIndirectCommandsLayoutCreateInfoEXT unwrapped = *pCreateInfo;
+  unwrapped.pipelineLayout = Unwrap(unwrapped.pipelineLayout);
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->CreateIndirectCommandsLayoutEXT(
+                          Unwrap(device), &unwrapped, NULL, pIndirectCommandsLayout));
+
+  if(ret == VK_SUCCESS)
+  {
+    ResourceId id =
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), *pIndirectCommandsLayout);
+
+    VkGeneratedCommandsLayoutData layout;
+    FillDGCLayoutData(layout, pCreateInfo);
+    m_IndirectCommandsLayoutsEXT[id] = layout;
+
+    if(IsCaptureMode(m_State))
+    {
+      Chunk *chunk = NULL;
+
+      {
+        CACHE_THREAD_SERIALISER();
+
+        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCreateIndirectCommandsLayoutEXT);
+        Serialise_vkCreateIndirectCommandsLayoutEXT(ser, device, pCreateInfo, NULL,
+                                                    pIndirectCommandsLayout);
+
+        chunk = scope.Get();
+      }
+
+      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pIndirectCommandsLayout);
+      record->AddChunk(chunk);
+
+      if(pCreateInfo->pipelineLayout != VK_NULL_HANDLE)
+        record->AddParent(GetRecord(pCreateInfo->pipelineLayout));
+    }
+  }
+
+  return ret;
+}
+
+void WrappedVulkan::vkDestroyIndirectCommandsLayoutEXT(
+    VkDevice device, VkIndirectCommandsLayoutEXT indirectCommandsLayout,
+    const VkAllocationCallbacks *)
+{
+  if(indirectCommandsLayout == VK_NULL_HANDLE)
+    return;
+
+  ResourceId id = GetResID(indirectCommandsLayout);
+  VkIndirectCommandsLayoutEXT unwrappedObj = Unwrap(indirectCommandsLayout);
+
+  m_IndirectCommandsLayoutsEXT.erase(id);
+  GetResourceManager()->ReleaseWrappedResource(indirectCommandsLayout, true);
+  if(ObjDisp(device)->DestroyIndirectCommandsLayoutEXT)
+    ObjDisp(device)->DestroyIndirectCommandsLayoutEXT(Unwrap(device), unwrappedObj, NULL);
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCreateIndirectExecutionSetEXT(
+    SerialiserType &ser, VkDevice device, const VkIndirectExecutionSetCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkIndirectExecutionSetEXT *pIndirectExecutionSet)
+{
+  uint32_t type =
+      pCreateInfo ? (uint32_t)pCreateInfo->type
+                  : (uint32_t)VK_INDIRECT_EXECUTION_SET_INFO_TYPE_MAX_ENUM_EXT;
+
+  VkPipeline initialPipeline = VK_NULL_HANDLE;
+  uint32_t maxPipelineCount = 0;
+  uint32_t shaderCount = 0;
+  uint32_t maxShaderCount = 0;
+  uint32_t pushConstantRangeCount = 0;
+  const VkShaderEXT *initialShaders = NULL;
+  const VkPushConstantRange *pushConstantRanges = NULL;
+
+  if(ser.IsWriting() && pCreateInfo)
+  {
+    if(type == (uint32_t)VK_INDIRECT_EXECUTION_SET_INFO_TYPE_PIPELINES_EXT &&
+       pCreateInfo->info.pPipelineInfo)
+    {
+      initialPipeline = pCreateInfo->info.pPipelineInfo->initialPipeline;
+      maxPipelineCount = pCreateInfo->info.pPipelineInfo->maxPipelineCount;
+    }
+    else if(type == (uint32_t)VK_INDIRECT_EXECUTION_SET_INFO_TYPE_SHADER_OBJECTS_EXT &&
+            pCreateInfo->info.pShaderInfo)
+    {
+      shaderCount = pCreateInfo->info.pShaderInfo->shaderCount;
+      initialShaders = pCreateInfo->info.pShaderInfo->pInitialShaders;
+      maxShaderCount = pCreateInfo->info.pShaderInfo->maxShaderCount;
+      pushConstantRangeCount = pCreateInfo->info.pShaderInfo->pushConstantRangeCount;
+      pushConstantRanges = pCreateInfo->info.pShaderInfo->pPushConstantRanges;
+    }
+  }
+
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(type).Important();
+  SERIALISE_ELEMENT(initialPipeline).Important();
+  SERIALISE_ELEMENT(maxPipelineCount);
+  SERIALISE_ELEMENT(shaderCount);
+  SERIALISE_ELEMENT_ARRAY(initialShaders, shaderCount).Important();
+  SERIALISE_ELEMENT(maxShaderCount);
+  SERIALISE_ELEMENT(pushConstantRangeCount);
+  SERIALISE_ELEMENT_ARRAY(pushConstantRanges, pushConstantRangeCount);
+  SERIALISE_ELEMENT_OPT(pAllocator).Hidden();
+  SERIALISE_ELEMENT_LOCAL(IndirectExecutionSet,
+                          GetResID(pIndirectExecutionSet ? *pIndirectExecutionSet
+                                                         : VK_NULL_HANDLE))
+      .TypedAs("VkIndirectExecutionSetEXT"_lit);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    VkIndirectExecutionSetEXT executionSet =
+        GetResourceManager()->CreateDeferredHandle<VkIndirectExecutionSetEXT>();
+
+    ResourceId live =
+        GetResourceManager()->WrapResource(IndirectExecutionSet, Unwrap(device), executionSet);
+
+    AddResource(IndirectExecutionSet, ResourceType::StateObject, "Indirect Execution Set");
+    DerivedResource(device, IndirectExecutionSet);
+    if(initialPipeline != VK_NULL_HANDLE)
+      DerivedResource(initialPipeline, IndirectExecutionSet);
+    for(uint32_t i = 0; i < shaderCount; i++)
+      if(initialShaders[i] != VK_NULL_HANDLE)
+        DerivedResource(initialShaders[i], IndirectExecutionSet);
+
+    m_IndirectExecutionSetsEXT[live] = (VkIndirectExecutionSetInfoTypeEXT)type;
+  }
+
+  return true;
+}
+
+VkResult WrappedVulkan::vkCreateIndirectExecutionSetEXT(
+    VkDevice device, const VkIndirectExecutionSetCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *, VkIndirectExecutionSetEXT *pIndirectExecutionSet)
+{
+  VkIndirectExecutionSetCreateInfoEXT unwrapped = *pCreateInfo;
+  VkIndirectExecutionSetPipelineInfoEXT pipelineInfo;
+  VkIndirectExecutionSetShaderInfoEXT shaderInfo;
+  VkIndirectExecutionSetShaderLayoutInfoEXT *layoutInfos = NULL;
+  VkDescriptorSetLayout *setLayouts = NULL;
+
+  if(pCreateInfo->type == VK_INDIRECT_EXECUTION_SET_INFO_TYPE_PIPELINES_EXT &&
+     pCreateInfo->info.pPipelineInfo)
+  {
+    pipelineInfo = *pCreateInfo->info.pPipelineInfo;
+    pipelineInfo.initialPipeline = Unwrap(pipelineInfo.initialPipeline);
+    unwrapped.info.pPipelineInfo = &pipelineInfo;
+  }
+  else if(pCreateInfo->type == VK_INDIRECT_EXECUTION_SET_INFO_TYPE_SHADER_OBJECTS_EXT &&
+          pCreateInfo->info.pShaderInfo)
+  {
+    shaderInfo = *pCreateInfo->info.pShaderInfo;
+    shaderInfo.pInitialShaders = UnwrapArray(shaderInfo.pInitialShaders, shaderInfo.shaderCount);
+
+    if(shaderInfo.pSetLayoutInfos)
+    {
+      uint32_t totalSetLayouts = 0;
+      for(uint32_t i = 0; i < shaderInfo.shaderCount; i++)
+        totalSetLayouts += shaderInfo.pSetLayoutInfos[i].setLayoutCount;
+
+      layoutInfos = GetTempArray<VkIndirectExecutionSetShaderLayoutInfoEXT>(shaderInfo.shaderCount);
+      setLayouts = GetTempArray<VkDescriptorSetLayout>(totalSetLayouts);
+
+      uint32_t layoutOffset = 0;
+      for(uint32_t i = 0; i < shaderInfo.shaderCount; i++)
+      {
+        layoutInfos[i] = shaderInfo.pSetLayoutInfos[i];
+        layoutInfos[i].pSetLayouts = setLayouts + layoutOffset;
+
+        for(uint32_t s = 0; s < shaderInfo.pSetLayoutInfos[i].setLayoutCount; s++)
+          setLayouts[layoutOffset + s] = Unwrap(shaderInfo.pSetLayoutInfos[i].pSetLayouts[s]);
+
+        layoutOffset += shaderInfo.pSetLayoutInfos[i].setLayoutCount;
+      }
+
+      shaderInfo.pSetLayoutInfos = layoutInfos;
+    }
+
+    unwrapped.info.pShaderInfo = &shaderInfo;
+  }
+
+  VkResult ret;
+  SERIALISE_TIME_CALL(ret = ObjDisp(device)->CreateIndirectExecutionSetEXT(
+                          Unwrap(device), &unwrapped, NULL, pIndirectExecutionSet));
+
+  if(ret == VK_SUCCESS)
+  {
+    ResourceId id =
+        GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), *pIndirectExecutionSet);
+    m_IndirectExecutionSetsEXT[id] = pCreateInfo->type;
+
+    if(IsCaptureMode(m_State))
+    {
+      Chunk *chunk = NULL;
+
+      {
+        CACHE_THREAD_SERIALISER();
+
+        SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCreateIndirectExecutionSetEXT);
+        Serialise_vkCreateIndirectExecutionSetEXT(ser, device, pCreateInfo, NULL,
+                                                  pIndirectExecutionSet);
+
+        chunk = scope.Get();
+      }
+
+      VkResourceRecord *record = GetResourceManager()->AddResourceRecord(*pIndirectExecutionSet);
+      record->AddChunk(chunk);
+
+      if(pCreateInfo->type == VK_INDIRECT_EXECUTION_SET_INFO_TYPE_PIPELINES_EXT &&
+         pCreateInfo->info.pPipelineInfo &&
+         pCreateInfo->info.pPipelineInfo->initialPipeline != VK_NULL_HANDLE)
+      {
+        record->AddParent(GetRecord(pCreateInfo->info.pPipelineInfo->initialPipeline));
+      }
+      else if(pCreateInfo->type == VK_INDIRECT_EXECUTION_SET_INFO_TYPE_SHADER_OBJECTS_EXT &&
+              pCreateInfo->info.pShaderInfo && pCreateInfo->info.pShaderInfo->pInitialShaders)
+      {
+        for(uint32_t i = 0; i < pCreateInfo->info.pShaderInfo->shaderCount; i++)
+          if(pCreateInfo->info.pShaderInfo->pInitialShaders[i] != VK_NULL_HANDLE)
+            record->AddParent(GetRecord(pCreateInfo->info.pShaderInfo->pInitialShaders[i]));
+      }
+    }
+  }
+
+  return ret;
+}
+
+void WrappedVulkan::vkDestroyIndirectExecutionSetEXT(
+    VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet, const VkAllocationCallbacks *)
+{
+  if(indirectExecutionSet == VK_NULL_HANDLE)
+    return;
+
+  ResourceId id = GetResID(indirectExecutionSet);
+  VkIndirectExecutionSetEXT unwrappedObj = Unwrap(indirectExecutionSet);
+
+  m_IndirectExecutionSetsEXT.erase(id);
+  GetResourceManager()->ReleaseWrappedResource(indirectExecutionSet, true);
+  if(ObjDisp(device)->DestroyIndirectExecutionSetEXT)
+    ObjDisp(device)->DestroyIndirectExecutionSetEXT(Unwrap(device), unwrappedObj, NULL);
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkUpdateIndirectExecutionSetPipelineEXT(
+    SerialiserType &ser, VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet,
+    uint32_t executionSetWriteCount,
+    const VkWriteIndirectExecutionSetPipelineEXT *pExecutionSetWrites)
+{
+  rdcarray<uint32_t> indicesStorage;
+  rdcarray<VkPipeline> pipelinesStorage;
+
+  if(ser.IsWriting())
+  {
+    indicesStorage.resize(executionSetWriteCount);
+    pipelinesStorage.resize(executionSetWriteCount);
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+    {
+      indicesStorage[i] = pExecutionSetWrites[i].index;
+      pipelinesStorage[i] = pExecutionSetWrites[i].pipeline;
+    }
+  }
+
+  const uint32_t *Indices = indicesStorage.data();
+  const VkPipeline *Pipelines = pipelinesStorage.data();
+
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(indirectExecutionSet).Important();
+  SERIALISE_ELEMENT(executionSetWriteCount);
+  SERIALISE_ELEMENT_ARRAY(Indices, executionSetWriteCount);
+  SERIALISE_ELEMENT_ARRAY(Pipelines, executionSetWriteCount).Important();
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    ResourceId executionSetId = GetResID(indirectExecutionSet);
+    DerivedResource(device, executionSetId);
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+      if(Pipelines[i] != VK_NULL_HANDLE)
+        DerivedResource(Pipelines[i], executionSetId);
+  }
+
+  return true;
+}
+
+void WrappedVulkan::vkUpdateIndirectExecutionSetPipelineEXT(
+    VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet, uint32_t executionSetWriteCount,
+    const VkWriteIndirectExecutionSetPipelineEXT *pExecutionSetWrites)
+{
+  rdcarray<VkWriteIndirectExecutionSetPipelineEXT> unwrappedWrites;
+  unwrappedWrites.resize(executionSetWriteCount);
+
+  for(uint32_t i = 0; i < executionSetWriteCount; i++)
+  {
+    unwrappedWrites[i] = pExecutionSetWrites[i];
+    unwrappedWrites[i].pipeline = Unwrap(unwrappedWrites[i].pipeline);
+  }
+
+  SERIALISE_TIME_CALL(ObjDisp(device)->UpdateIndirectExecutionSetPipelineEXT(
+      Unwrap(device), Unwrap(indirectExecutionSet), executionSetWriteCount, unwrappedWrites.data()));
+
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkUpdateIndirectExecutionSetPipelineEXT);
+    Serialise_vkUpdateIndirectExecutionSetPipelineEXT(ser, device, indirectExecutionSet,
+                                                      executionSetWriteCount, pExecutionSetWrites);
+
+    VkResourceRecord *record = GetRecord(indirectExecutionSet);
+    record->AddChunk(scope.Get());
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+      if(pExecutionSetWrites[i].pipeline != VK_NULL_HANDLE)
+        record->AddParent(GetRecord(pExecutionSetWrites[i].pipeline));
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkUpdateIndirectExecutionSetShaderEXT(
+    SerialiserType &ser, VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet,
+    uint32_t executionSetWriteCount,
+    const VkWriteIndirectExecutionSetShaderEXT *pExecutionSetWrites)
+{
+  rdcarray<uint32_t> indicesStorage;
+  rdcarray<VkShaderEXT> shadersStorage;
+
+  if(ser.IsWriting())
+  {
+    indicesStorage.resize(executionSetWriteCount);
+    shadersStorage.resize(executionSetWriteCount);
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+    {
+      indicesStorage[i] = pExecutionSetWrites[i].index;
+      shadersStorage[i] = pExecutionSetWrites[i].shader;
+    }
+  }
+
+  const uint32_t *Indices = indicesStorage.data();
+  const VkShaderEXT *Shaders = shadersStorage.data();
+
+  SERIALISE_ELEMENT(device);
+  SERIALISE_ELEMENT(indirectExecutionSet).Important();
+  SERIALISE_ELEMENT(executionSetWriteCount);
+  SERIALISE_ELEMENT_ARRAY(Indices, executionSetWriteCount);
+  SERIALISE_ELEMENT_ARRAY(Shaders, executionSetWriteCount).Important();
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    ResourceId executionSetId = GetResID(indirectExecutionSet);
+    DerivedResource(device, executionSetId);
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+      if(Shaders[i] != VK_NULL_HANDLE)
+        DerivedResource(Shaders[i], executionSetId);
+  }
+
+  return true;
+}
+
+void WrappedVulkan::vkUpdateIndirectExecutionSetShaderEXT(
+    VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet, uint32_t executionSetWriteCount,
+    const VkWriteIndirectExecutionSetShaderEXT *pExecutionSetWrites)
+{
+  rdcarray<VkWriteIndirectExecutionSetShaderEXT> unwrappedWrites;
+  unwrappedWrites.resize(executionSetWriteCount);
+
+  for(uint32_t i = 0; i < executionSetWriteCount; i++)
+  {
+    unwrappedWrites[i] = pExecutionSetWrites[i];
+    unwrappedWrites[i].shader = Unwrap(unwrappedWrites[i].shader);
+  }
+
+  SERIALISE_TIME_CALL(ObjDisp(device)->UpdateIndirectExecutionSetShaderEXT(
+      Unwrap(device), Unwrap(indirectExecutionSet), executionSetWriteCount, unwrappedWrites.data()));
+
+  if(IsCaptureMode(m_State))
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkUpdateIndirectExecutionSetShaderEXT);
+    Serialise_vkUpdateIndirectExecutionSetShaderEXT(ser, device, indirectExecutionSet,
+                                                    executionSetWriteCount, pExecutionSetWrites);
+
+    VkResourceRecord *record = GetRecord(indirectExecutionSet);
+    record->AddChunk(scope.Get());
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+      if(pExecutionSetWrites[i].shader != VK_NULL_HANDLE)
+        record->AddParent(GetRecord(pExecutionSetWrites[i].shader));
+  }
+}
+
+void WrappedVulkan::UnwrapGeneratedCommandsPNext(const void *pNext, VkBaseOutStructure *tail)
+{
+  tail->pNext = NULL;
+
+  for(const VkBaseInStructure *next = (const VkBaseInStructure *)pNext; next; next = next->pNext)
+  {
+    if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT)
+    {
+      const VkGeneratedCommandsPipelineInfoEXT *in =
+          (const VkGeneratedCommandsPipelineInfoEXT *)next;
+      VkGeneratedCommandsPipelineInfoEXT *out =
+          (VkGeneratedCommandsPipelineInfoEXT *)GetTempMemory(sizeof(*out));
+
+      *out = *in;
+      out->pipeline = Unwrap(out->pipeline);
+      out->pNext = NULL;
+
+      tail->pNext = (VkBaseOutStructure *)out;
+      tail = (VkBaseOutStructure *)out;
+    }
+    else if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT)
+    {
+      const VkGeneratedCommandsShaderInfoEXT *in = (const VkGeneratedCommandsShaderInfoEXT *)next;
+      VkGeneratedCommandsShaderInfoEXT *out =
+          (VkGeneratedCommandsShaderInfoEXT *)GetTempMemory(sizeof(*out));
+
+      *out = *in;
+      out->pShaders =
+          (out->shaderCount && out->pShaders) ? UnwrapArray(out->pShaders, out->shaderCount) : NULL;
+      out->pNext = NULL;
+
+      tail->pNext = (VkBaseOutStructure *)out;
+      tail = (VkBaseOutStructure *)out;
+    }
+  }
+}
+
+static void MarkGeneratedCommandsPNextResources(WrappedVulkan *driver, VkResourceRecord *record,
+                                                const void *pNext)
+{
+  for(const VkBaseInStructure *next = (const VkBaseInStructure *)pNext; next; next = next->pNext)
+  {
+    if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT)
+    {
+      const VkGeneratedCommandsPipelineInfoEXT *info =
+          (const VkGeneratedCommandsPipelineInfoEXT *)next;
+
+      if(info->pipeline != VK_NULL_HANDLE)
+        record->MarkResourceFrameReferenced(GetResID(info->pipeline), eFrameRef_Read);
+    }
+    else if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT)
+    {
+      const VkGeneratedCommandsShaderInfoEXT *info = (const VkGeneratedCommandsShaderInfoEXT *)next;
+
+      if(info->pShaders)
+        for(uint32_t i = 0; i < info->shaderCount; i++)
+          if(info->pShaders[i] != VK_NULL_HANDLE)
+            record->MarkResourceFrameReferenced(GetResID(info->pShaders[i]), eFrameRef_Read);
+    }
+  }
+}
+
+void WrappedVulkan::vkGetGeneratedCommandsMemoryRequirementsEXT(
+    VkDevice device, const VkGeneratedCommandsMemoryRequirementsInfoEXT *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements)
+{
+  VkGeneratedCommandsMemoryRequirementsInfoEXT unwrapped = *pInfo;
+  unwrapped.indirectExecutionSet = Unwrap(unwrapped.indirectExecutionSet);
+  unwrapped.indirectCommandsLayout = Unwrap(unwrapped.indirectCommandsLayout);
+  UnwrapGeneratedCommandsPNext(pInfo->pNext, (VkBaseOutStructure *)&unwrapped);
+
+  SERIALISE_TIME_CALL(ObjDisp(device)->GetGeneratedCommandsMemoryRequirementsEXT(
+      Unwrap(device), &unwrapped, pMemoryRequirements));
+}
+
+static VkGeneratedCommandsInfoEXT UnwrapGeneratedCommandsInfoEXT(
+    WrappedVulkan *driver, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo)
+{
+  VkGeneratedCommandsInfoEXT unwrapped = *pGeneratedCommandsInfo;
+  unwrapped.indirectExecutionSet = Unwrap(unwrapped.indirectExecutionSet);
+  unwrapped.indirectCommandsLayout = Unwrap(unwrapped.indirectCommandsLayout);
+  driver->UnwrapGeneratedCommandsPNext(pGeneratedCommandsInfo->pNext,
+                                       (VkBaseOutStructure *)&unwrapped);
+  return unwrapped;
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCmdPreprocessGeneratedCommandsEXT(
+    SerialiserType &ser, VkCommandBuffer commandBuffer,
+    const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo, VkCommandBuffer stateCommandBuffer)
+{
+  SERIALISE_ELEMENT(commandBuffer);
+  SERIALISE_ELEMENT_LOCAL(ShaderStages,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->shaderStages : 0);
+  SERIALISE_ELEMENT_LOCAL(IndirectExecutionSet,
+                          pGeneratedCommandsInfo
+                              ? pGeneratedCommandsInfo->indirectExecutionSet
+                              : VK_NULL_HANDLE)
+      .Important();
+  SERIALISE_ELEMENT_LOCAL(IndirectCommandsLayout,
+                          pGeneratedCommandsInfo
+                              ? pGeneratedCommandsInfo->indirectCommandsLayout
+                              : VK_NULL_HANDLE)
+      .Important();
+  SERIALISE_ELEMENT_LOCAL(IndirectAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->indirectAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(IndirectAddressSize,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->indirectAddressSize : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(PreprocessAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->preprocessAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(PreprocessSize,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->preprocessSize : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(MaxSequenceCount,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxSequenceCount : 0);
+  SERIALISE_ELEMENT_LOCAL(SequenceCountAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->sequenceCountAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(MaxDrawCount,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxDrawCount : 0);
+  SERIALISE_ELEMENT(stateCommandBuffer);
+
+  Serialise_DebugMessages(ser);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+    m_LastCmdBufferID = GetResID(commandBuffer);
+
+  return true;
+}
+
+void WrappedVulkan::vkCmdPreprocessGeneratedCommandsEXT(
+    VkCommandBuffer commandBuffer, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
+    VkCommandBuffer stateCommandBuffer)
+{
+  SCOPED_DBG_SINK();
+
+  VkGeneratedCommandsInfoEXT unwrapped =
+      UnwrapGeneratedCommandsInfoEXT(this, pGeneratedCommandsInfo);
+
+  SERIALISE_TIME_CALL(ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT(
+      Unwrap(commandBuffer), &unwrapped, Unwrap(stateCommandBuffer)));
+
+  if(IsCaptureMode(m_State))
+  {
+    VkResourceRecord *record = GetRecord(commandBuffer);
+
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdPreprocessGeneratedCommandsEXT);
+    Serialise_vkCmdPreprocessGeneratedCommandsEXT(ser, commandBuffer, pGeneratedCommandsInfo,
+                                                  stateCommandBuffer);
+
+    record->AddChunk(scope.Get(&record->cmdInfo->alloc));
+    record->MarkResourceFrameReferenced(GetResID(pGeneratedCommandsInfo->indirectExecutionSet),
+                                        eFrameRef_Read);
+    record->MarkResourceFrameReferenced(GetResID(pGeneratedCommandsInfo->indirectCommandsLayout),
+                                        eFrameRef_Read);
+    if(stateCommandBuffer != VK_NULL_HANDLE)
+      record->MarkResourceFrameReferenced(GetResID(stateCommandBuffer), eFrameRef_Read);
+    MarkGeneratedCommandsPNextResources(this, record, pGeneratedCommandsInfo->pNext);
+
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->indirectAddress,
+                         pGeneratedCommandsInfo->indirectAddressSize, eFrameRef_Read);
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->preprocessAddress,
+                         pGeneratedCommandsInfo->preprocessSize, eFrameRef_PartialWrite);
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->sequenceCountAddress, 4,
+                         eFrameRef_Read);
+  }
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
+    SerialiserType &ser, VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
+    const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo)
+{
+  SERIALISE_ELEMENT(commandBuffer);
+  SERIALISE_ELEMENT(isPreprocessed);
+  SERIALISE_ELEMENT_LOCAL(ShaderStages,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->shaderStages : 0);
+  SERIALISE_ELEMENT_LOCAL(IndirectExecutionSet,
+                          pGeneratedCommandsInfo
+                              ? pGeneratedCommandsInfo->indirectExecutionSet
+                              : VK_NULL_HANDLE)
+      .Important();
+  SERIALISE_ELEMENT_LOCAL(IndirectCommandsLayout,
+                          pGeneratedCommandsInfo
+                              ? pGeneratedCommandsInfo->indirectCommandsLayout
+                              : VK_NULL_HANDLE)
+      .Important();
+  SERIALISE_ELEMENT_LOCAL(IndirectAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->indirectAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(IndirectAddressSize,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->indirectAddressSize : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(PreprocessAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->preprocessAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(PreprocessSize,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->preprocessSize : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(MaxSequenceCount,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxSequenceCount : 0);
+  SERIALISE_ELEMENT_LOCAL(SequenceCountAddress,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->sequenceCountAddress : 0)
+      .OffsetOrSize();
+  SERIALISE_ELEMENT_LOCAL(MaxDrawCount,
+                          pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxDrawCount : 0);
+
+  Serialise_DebugMessages(ser);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    m_LastCmdBufferID = GetResID(commandBuffer);
+
+    if(IsActiveReplaying(m_State))
+      return true;
+
+    ResourceId layoutId = GetResID(IndirectCommandsLayout);
+    VkGeneratedCommandsLayoutData layout;
+    if(m_IndirectCommandsLayoutsEXT.find(layoutId) != m_IndirectCommandsLayoutsEXT.end())
+      layout = m_IndirectCommandsLayoutsEXT[layoutId];
+
+    const VkDeviceSize stride = MinimumDGCStride(layout);
+    VkDeviceSize dataSize = IndirectAddressSize;
+    if(dataSize == 0 && stride != 0)
+      dataSize = stride * MaxSequenceCount;
+
+    ResourceId indirectBufferId;
+    uint64_t indirectOffset = 0;
+    GetResIDFromAddr(IndirectAddress, indirectBufferId, indirectOffset);
+    if(indirectBufferId == ResourceId())
+      GetResIDFromAddr(IndirectAddress | (0xffffULL << 48), indirectBufferId, indirectOffset);
+
+    ResourceId countBufferId;
+    uint64_t countOffset = 0;
+    if(SequenceCountAddress != 0)
+    {
+      GetResIDFromAddr(SequenceCountAddress, countBufferId, countOffset);
+      if(countBufferId == ResourceId())
+        GetResIDFromAddr(SequenceCountAddress | (0xffffULL << 48), countBufferId, countOffset);
+    }
+
+    VkBuffer indirectBuffer = indirectBufferId != ResourceId()
+                                  ? GetResourceManager()->GetHandle<VkBuffer>(indirectBufferId)
+                                  : VK_NULL_HANDLE;
+    VkBuffer countBuffer = countBufferId != ResourceId()
+                               ? GetResourceManager()->GetHandle<VkBuffer>(countBufferId)
+                               : VK_NULL_HANDLE;
+
+    bool executeImmediately =
+        layout.actionType == VkGeneratedCommandsActionType::Dispatch ||
+        !IsRenderpassOpen(m_LastCmdBufferID);
+
+    VkGeneratedCommandsPatchData generatedPatch = FetchGeneratedCommandsData(
+        commandBuffer, layoutId, indirectBuffer, indirectOffset, dataSize, MaxSequenceCount,
+        (uint32_t)stride, countBuffer, countOffset, executeImmediately);
+
+    rdcstr name = "vkCmdExecuteGeneratedCommandsEXT";
+    SDChunk *baseChunk = m_StructuredFile->chunks.back();
+
+    if(MaxSequenceCount == 0)
+    {
+      AddEvent();
+
+      ActionDescription action;
+      action.customName = name + "(0)";
+      action.flags = ActionFlagsForDGCAction(layout.actionType);
+      AddAction(action);
+
+      VulkanActionTreeNode &actionNode = GetActionStack().back()->children.back();
+      actionNode.generatedPatch = generatedPatch;
+      if(indirectBufferId != ResourceId())
+        actionNode.resourceUsage.push_back(make_rdcpair(
+            indirectBufferId, EventUsage(actionNode.action.eventId, ResourceUsage::Indirect)));
+      if(countBufferId != ResourceId())
+        actionNode.resourceUsage.push_back(make_rdcpair(
+            countBufferId, EventUsage(actionNode.action.eventId, ResourceUsage::Indirect)));
+
+      return true;
+    }
+
+    ActionDescription action;
+    action.customName = name;
+    action.flags = ActionFlags::MultiAction | ActionFlags::PushMarker;
+
+    AddEvent();
+    AddAction(action);
+
+    VulkanActionTreeNode &actionNode = GetActionStack().back()->children.back();
+    actionNode.generatedPatch = generatedPatch;
+    if(indirectBufferId != ResourceId())
+      actionNode.resourceUsage.push_back(make_rdcpair(
+          indirectBufferId, EventUsage(actionNode.action.eventId, ResourceUsage::Indirect)));
+    if(countBufferId != ResourceId())
+      actionNode.resourceUsage.push_back(make_rdcpair(
+          countBufferId, EventUsage(actionNode.action.eventId, ResourceUsage::Indirect)));
+
+    m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID++;
+
+    for(uint32_t i = 0; i < MaxSequenceCount; i++)
+    {
+      ActionDescription multi;
+      multi.customName = name;
+      multi.flags = ActionFlagsForDGCAction(layout.actionType);
+
+      SDChunk *fakeChunk = new SDChunk("Generated command sub-command"_lit);
+      fakeChunk->metadata = baseChunk->metadata;
+      fakeChunk->metadata.chunkID = (uint32_t)VulkanChunk::vkCmdGeneratedCommandSubCommand;
+
+      {
+        StructuredSerialiser structuriser(fakeChunk, ser.GetChunkLookup());
+
+        structuriser.Serialise<uint32_t>("sequenceIndex"_lit, 0U);
+        structuriser.Serialise("layout"_lit, layoutId);
+        structuriser.Serialise("buffer"_lit, indirectBufferId);
+        structuriser.Serialise("offset"_lit, indirectOffset).OffsetOrSize();
+        structuriser.Serialise("stride"_lit, stride).OffsetOrSize();
+
+        if(layout.actionType == VkGeneratedCommandsActionType::Draw)
+          structuriser.Serialise("command"_lit, VkDrawIndirectCommand()).Important();
+        else if(layout.actionType == VkGeneratedCommandsActionType::DrawIndexed)
+          structuriser.Serialise("command"_lit, VkDrawIndexedIndirectCommand()).Important();
+        else if(layout.actionType == VkGeneratedCommandsActionType::Dispatch)
+          structuriser.Serialise("command"_lit, VkDispatchIndirectCommand()).Important();
+      }
+
+      m_StructuredFile->chunks.push_back(fakeChunk);
+
+      AddEvent();
+      AddAction(multi);
+
+      m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID++;
+    }
+
+    AddEvent();
+    action.customName = name + " end";
+    action.flags = ActionFlags::PopMarker;
+    AddAction(action);
+  }
+
+  return true;
+}
+
+void WrappedVulkan::vkCmdExecuteGeneratedCommandsEXT(
+    VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
+    const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo)
+{
+  SCOPED_DBG_SINK();
+
+  VkGeneratedCommandsInfoEXT unwrapped =
+      UnwrapGeneratedCommandsInfoEXT(this, pGeneratedCommandsInfo);
+
+  SERIALISE_TIME_CALL(ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT(
+      Unwrap(commandBuffer), isPreprocessed, &unwrapped));
+
+  if(IsCaptureMode(m_State))
+  {
+    VkResourceRecord *record = GetRecord(commandBuffer);
+
+    CACHE_THREAD_SERIALISER();
+
+    ser.SetActionChunk();
+    SCOPED_SERIALISE_CHUNK(VulkanChunk::vkCmdExecuteGeneratedCommandsEXT);
+    Serialise_vkCmdExecuteGeneratedCommandsEXT(ser, commandBuffer, isPreprocessed,
+                                               pGeneratedCommandsInfo);
+
+    record->AddChunk(scope.Get(&record->cmdInfo->alloc));
+    record->MarkResourceFrameReferenced(GetResID(pGeneratedCommandsInfo->indirectExecutionSet),
+                                        eFrameRef_Read);
+    record->MarkResourceFrameReferenced(GetResID(pGeneratedCommandsInfo->indirectCommandsLayout),
+                                        eFrameRef_Read);
+    MarkGeneratedCommandsPNextResources(this, record, pGeneratedCommandsInfo->pNext);
+
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->indirectAddress,
+                         pGeneratedCommandsInfo->indirectAddressSize, eFrameRef_Read);
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->preprocessAddress,
+                         pGeneratedCommandsInfo->preprocessSize, eFrameRef_Read);
+    MarkDGCAddressBuffer(this, record, pGeneratedCommandsInfo->sequenceCountAddress, 4,
+                         eFrameRef_Read);
+  }
+}
+
 INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateCommandPool, VkDevice device,
                                 const VkCommandPoolCreateInfo *pCreateInfo,
                                 const VkAllocationCallbacks *, VkCommandPool *pCommandPool);
@@ -10706,6 +11771,29 @@ INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdPushDescriptorSet2, VkCommandBuffer c
 INSTANTIATE_FUNCTION_SERIALISED(
     void, vkCmdPushDescriptorSetWithTemplate2, VkCommandBuffer commandBuffer,
     const VkPushDescriptorSetWithTemplateInfo *pPushDescriptorSetWithTemplateInfo);
+
+INSTANTIATE_FUNCTION_SERIALISED(
+    void, vkCmdPreprocessGeneratedCommandsEXT, VkCommandBuffer commandBuffer,
+    const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo, VkCommandBuffer stateCommandBuffer);
+INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdExecuteGeneratedCommandsEXT,
+                                VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
+                                const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo);
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateIndirectCommandsLayoutEXT, VkDevice device,
+                                const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator,
+                                VkIndirectCommandsLayoutEXT *pIndirectCommandsLayout);
+INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateIndirectExecutionSetEXT, VkDevice device,
+                                const VkIndirectExecutionSetCreateInfoEXT *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator,
+                                VkIndirectExecutionSetEXT *pIndirectExecutionSet);
+INSTANTIATE_FUNCTION_SERIALISED(void, vkUpdateIndirectExecutionSetPipelineEXT, VkDevice device,
+                                VkIndirectExecutionSetEXT indirectExecutionSet,
+                                uint32_t executionSetWriteCount,
+                                const VkWriteIndirectExecutionSetPipelineEXT *pExecutionSetWrites);
+INSTANTIATE_FUNCTION_SERIALISED(void, vkUpdateIndirectExecutionSetShaderEXT, VkDevice device,
+                                VkIndirectExecutionSetEXT indirectExecutionSet,
+                                uint32_t executionSetWriteCount,
+                                const VkWriteIndirectExecutionSetShaderEXT *pExecutionSetWrites);
 
 INSTANTIATE_FUNCTION_SERIALISED(void, vkCmdBeginCustomResolveEXT, VkCommandBuffer commandBuffer,
                                 const VkBeginCustomResolveInfoEXT *pBeginCustomResolveInfo);

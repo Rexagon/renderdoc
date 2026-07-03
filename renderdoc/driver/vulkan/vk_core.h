@@ -130,6 +130,59 @@ struct VkIndirectPatchData
   ResourceId commandBuffer;
 };
 
+enum class VkGeneratedCommandsActionType
+{
+  Unknown,
+  Draw,
+  DrawIndexed,
+  Dispatch,
+};
+
+struct VkGeneratedCommandsLayoutTokenData
+{
+  VkIndirectCommandsTokenTypeEXT type = VK_INDIRECT_COMMANDS_TOKEN_TYPE_MAX_ENUM_EXT;
+  uint32_t offset = 0;
+
+  VkPushConstantRange pushRange = {};
+  uint32_t vertexBindingUnit = 0;
+  VkIndirectCommandsInputModeFlagBitsEXT indexMode =
+      VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT;
+  VkIndirectExecutionSetInfoTypeEXT executionSetType =
+      VK_INDIRECT_EXECUTION_SET_INFO_TYPE_MAX_ENUM_EXT;
+  VkShaderStageFlags executionSetStages = 0;
+};
+
+struct VkGeneratedCommandsLayoutData
+{
+  VkIndirectCommandsLayoutUsageFlagsEXT flags = 0;
+  VkShaderStageFlags shaderStages = 0;
+  uint32_t indirectStride = 0;
+  ResourceId pipelineLayout;
+  rdcarray<VkGeneratedCommandsLayoutTokenData> tokens;
+
+  VkGeneratedCommandsActionType actionType = VkGeneratedCommandsActionType::Unknown;
+  uint32_t actionTokenIndex = ~0U;
+};
+
+struct VkGeneratedCommandsPatchData
+{
+  MemoryAllocation alloc;
+  VkBuffer buf = VK_NULL_HANDLE;
+
+  ResourceId commandBuffer;
+  ResourceId layout;
+  ResourceId indirectBuffer;
+  VkDeviceSize indirectOffset = 0;
+  VkDeviceSize indirectSize = 0;
+
+  ResourceId countBuffer;
+  VkDeviceSize countOffset = 0;
+  bool hasCount = false;
+
+  uint32_t count = 0;
+  uint32_t stride = 0;
+};
+
 struct VulkanActionTreeNode
 {
   VulkanActionTreeNode() {}
@@ -138,6 +191,7 @@ struct VulkanActionTreeNode
   rdcarray<VulkanActionTreeNode> children;
 
   VkIndirectPatchData indirectPatch;
+  VkGeneratedCommandsPatchData generatedPatch;
 
   rdcarray<rdcpair<ResourceId, EventUsage>> resourceUsage;
 
@@ -1138,6 +1192,8 @@ private:
   void CheckPendingCommandBufferCallbacks();
 
   GPUAddressRangeTracker m_AddressTracker;
+  rdcflatmap<ResourceId, VkGeneratedCommandsLayoutData> m_IndirectCommandsLayoutsEXT;
+  rdcflatmap<ResourceId, VkIndirectExecutionSetInfoTypeEXT> m_IndirectExecutionSetsEXT;
   GPUAddressRange CreateAddressRange(VkDevice device, VkBuffer buffer);
 
   Threading::CriticalSection m_AnnotationsLock;
@@ -1185,6 +1241,11 @@ private:
                                         VkBuffer dataBuffer, VkDeviceSize dataOffset, uint32_t count,
                                         uint32_t stride = 0, VkBuffer counterBuffer = VK_NULL_HANDLE,
                                         VkDeviceSize counterOffset = 0);
+  VkGeneratedCommandsPatchData FetchGeneratedCommandsData(
+      VkCommandBuffer commandBuffer, ResourceId layout, VkBuffer dataBuffer, VkDeviceSize dataOffset,
+      VkDeviceSize dataSize, uint32_t count, uint32_t stride,
+      VkBuffer counterBuffer = VK_NULL_HANDLE, VkDeviceSize counterOffset = 0,
+      bool executeImmediately = false);
   void ExecuteIndirectReadback(VkCommandBuffer commandBuffer,
                                const VkIndirectRecordData &indirectcopy);
   void ReplayIndirectCB(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
@@ -3243,6 +3304,46 @@ public:
 
   VkResult vkGetShaderBinaryDataEXT(VkDevice device, VkShaderEXT shader, size_t *pDataSize,
                                     void *pData);
+
+  // VK_EXT_device_generated_commands
+  void UnwrapGeneratedCommandsPNext(const void *pNext, VkBaseOutStructure *tail);
+
+  void vkGetGeneratedCommandsMemoryRequirementsEXT(
+      VkDevice device, const VkGeneratedCommandsMemoryRequirementsInfoEXT *pInfo,
+      VkMemoryRequirements2 *pMemoryRequirements);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdPreprocessGeneratedCommandsEXT,
+                                VkCommandBuffer commandBuffer,
+                                const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
+                                VkCommandBuffer stateCommandBuffer);
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdExecuteGeneratedCommandsEXT,
+                                VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
+                                const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo);
+
+  IMPLEMENT_FUNCTION_SERIALISED(VkResult, vkCreateIndirectCommandsLayoutEXT, VkDevice device,
+                                const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator,
+                                VkIndirectCommandsLayoutEXT *pIndirectCommandsLayout);
+  void vkDestroyIndirectCommandsLayoutEXT(VkDevice device,
+                                          VkIndirectCommandsLayoutEXT indirectCommandsLayout,
+                                          const VkAllocationCallbacks *pAllocator);
+
+  IMPLEMENT_FUNCTION_SERIALISED(VkResult, vkCreateIndirectExecutionSetEXT, VkDevice device,
+                                const VkIndirectExecutionSetCreateInfoEXT *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator,
+                                VkIndirectExecutionSetEXT *pIndirectExecutionSet);
+  void vkDestroyIndirectExecutionSetEXT(VkDevice device,
+                                        VkIndirectExecutionSetEXT indirectExecutionSet,
+                                        const VkAllocationCallbacks *pAllocator);
+
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkUpdateIndirectExecutionSetPipelineEXT, VkDevice device,
+                                VkIndirectExecutionSetEXT indirectExecutionSet,
+                                uint32_t executionSetWriteCount,
+                                const VkWriteIndirectExecutionSetPipelineEXT *pExecutionSetWrites);
+  IMPLEMENT_FUNCTION_SERIALISED(void, vkUpdateIndirectExecutionSetShaderEXT, VkDevice device,
+                                VkIndirectExecutionSetEXT indirectExecutionSet,
+                                uint32_t executionSetWriteCount,
+                                const VkWriteIndirectExecutionSetShaderEXT *pExecutionSetWrites);
 
   // VK_KHR_ray_tracing_pipeline
   IMPLEMENT_FUNCTION_SERIALISED(void, vkCmdTraceRaysKHR, VkCommandBuffer commandBuffer,

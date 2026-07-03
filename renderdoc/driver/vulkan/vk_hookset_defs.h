@@ -2056,6 +2056,33 @@
               uint32_t, setCount, const uint32_t *, pBufferIndices, const VkDeviceSize *, pOffsets); \
   HookDefine4(void, vkCmdBindDescriptorBufferEmbeddedSamplersEXT, VkCommandBuffer, commandBuffer,    \
               VkPipelineBindPoint, pipelineBindPoint, VkPipelineLayout, layout, uint32_t, set);      \
+  HookDefine3(void, vkGetGeneratedCommandsMemoryRequirementsEXT, VkDevice, device,                   \
+              const VkGeneratedCommandsMemoryRequirementsInfoEXT *, pInfo, VkMemoryRequirements2 *,  \
+              pMemoryRequirements);                                                                  \
+  HookDefine3(void, vkCmdPreprocessGeneratedCommandsEXT, VkCommandBuffer, commandBuffer,             \
+              const VkGeneratedCommandsInfoEXT *, pGeneratedCommandsInfo, VkCommandBuffer,           \
+              stateCommandBuffer);                                                                   \
+  HookDefine3(void, vkCmdExecuteGeneratedCommandsEXT, VkCommandBuffer, commandBuffer, VkBool32,      \
+              isPreprocessed, const VkGeneratedCommandsInfoEXT *, pGeneratedCommandsInfo);           \
+  HookDefine4(VkResult, vkCreateIndirectCommandsLayoutEXT, VkDevice, device,                         \
+              const VkIndirectCommandsLayoutCreateInfoEXT *, pCreateInfo,                            \
+              const VkAllocationCallbacks *, pAllocator, VkIndirectCommandsLayoutEXT *,              \
+              pIndirectCommandsLayout);                                                              \
+  HookDefine3(void, vkDestroyIndirectCommandsLayoutEXT, VkDevice, device,                            \
+              VkIndirectCommandsLayoutEXT, indirectCommandsLayout, const VkAllocationCallbacks *,    \
+              pAllocator);                                                                           \
+  HookDefine4(VkResult, vkCreateIndirectExecutionSetEXT, VkDevice, device,                           \
+              const VkIndirectExecutionSetCreateInfoEXT *, pCreateInfo,                              \
+              const VkAllocationCallbacks *, pAllocator, VkIndirectExecutionSetEXT *,                \
+              pIndirectExecutionSet);                                                                \
+  HookDefine3(void, vkDestroyIndirectExecutionSetEXT, VkDevice, device, VkIndirectExecutionSetEXT,   \
+              indirectExecutionSet, const VkAllocationCallbacks *, pAllocator);                      \
+  HookDefine4(void, vkUpdateIndirectExecutionSetPipelineEXT, VkDevice, device,                       \
+              VkIndirectExecutionSetEXT, indirectExecutionSet, uint32_t, executionSetWriteCount,     \
+              const VkWriteIndirectExecutionSetPipelineEXT *, pExecutionSetWrites);                  \
+  HookDefine4(void, vkUpdateIndirectExecutionSetShaderEXT, VkDevice, device,                         \
+              VkIndirectExecutionSetEXT, indirectExecutionSet, uint32_t, executionSetWriteCount,     \
+              const VkWriteIndirectExecutionSetShaderEXT *, pExecutionSetWrites);                    \
   HookDefine3(VkResult, vkGetBufferOpaqueCaptureDescriptorDataEXT, VkDevice, device,                 \
               const VkBufferCaptureDescriptorDataInfoEXT *, pInfo, void *, pData);                   \
   HookDefine3(VkResult, vkGetImageOpaqueCaptureDescriptorDataEXT, VkDevice, device,                  \

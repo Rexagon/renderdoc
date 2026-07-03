@@ -135,6 +135,93 @@ VkIndirectPatchData WrappedVulkan::FetchIndirectData(VkIndirectPatchType type,
   return indirectPatch;
 }
 
+VkGeneratedCommandsPatchData WrappedVulkan::FetchGeneratedCommandsData(
+    VkCommandBuffer commandBuffer, ResourceId layout, VkBuffer dataBuffer, VkDeviceSize dataOffset,
+    VkDeviceSize dataSize, uint32_t count, uint32_t stride, VkBuffer counterBuffer,
+    VkDeviceSize counterOffset, bool executeImmediately)
+{
+  VkGeneratedCommandsPatchData patch;
+  patch.commandBuffer = m_LastCmdBufferID;
+  patch.layout = layout;
+  patch.indirectBuffer = dataBuffer != VK_NULL_HANDLE ? GetResID(dataBuffer) : ResourceId();
+  patch.indirectOffset = dataOffset;
+  patch.indirectSize = dataSize;
+  patch.countBuffer = counterBuffer != VK_NULL_HANDLE ? GetResID(counterBuffer) : ResourceId();
+  patch.countOffset = counterOffset;
+  patch.hasCount = (counterBuffer != VK_NULL_HANDLE);
+  patch.count = count;
+  patch.stride = stride;
+
+  if(count == 0 || dataBuffer == VK_NULL_HANDLE || dataSize == 0)
+    return patch;
+
+  VkBufferCreateInfo bufInfo = {
+      VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, AlignUp16(dataSize),
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+  };
+
+  if(counterBuffer != VK_NULL_HANDLE)
+    bufInfo.size += 16;
+
+  VkBuffer paramsbuf = VK_NULL_HANDLE;
+  vkCreateBuffer(m_Device, &bufInfo, NULL, &paramsbuf);
+  MemoryAllocation alloc =
+      AllocateMemoryForResource(paramsbuf, MemoryScope::IndirectReadback, MemoryType::Readback);
+
+  VkResult vkr = ObjDisp(m_Device)->BindBufferMemory(Unwrap(m_Device), Unwrap(paramsbuf),
+                                                     Unwrap(alloc.mem), alloc.offs);
+  CHECK_VKR(this, vkr);
+
+  VkBufferMemoryBarrier buf = {
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      NULL,
+      VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_COMMAND_PREPROCESS_READ_BIT_EXT |
+          VK_ACCESS_ALL_WRITE_BITS,
+      VK_ACCESS_TRANSFER_READ_BIT,
+      VK_QUEUE_FAMILY_IGNORED,
+      VK_QUEUE_FAMILY_IGNORED,
+      Unwrap(dataBuffer),
+      dataOffset,
+      dataSize,
+  };
+
+  VkIndirectRecordData indirectcopy = {};
+  indirectcopy.paramsBarrier = buf;
+
+  VkBufferCopy copy = {dataOffset, 0, dataSize};
+
+  indirectcopy.paramsCopy.src = dataBuffer;
+  indirectcopy.paramsCopy.dst = paramsbuf;
+  indirectcopy.paramsCopy.copy = copy;
+
+  if(counterBuffer != VK_NULL_HANDLE)
+  {
+    buf.buffer = Unwrap(counterBuffer);
+    buf.offset = counterOffset;
+    buf.size = 4;
+
+    indirectcopy.countBarrier = buf;
+
+    copy.srcOffset = counterOffset;
+    copy.dstOffset = bufInfo.size - 16;
+    copy.size = 4;
+
+    indirectcopy.countCopy.src = counterBuffer;
+    indirectcopy.countCopy.dst = paramsbuf;
+    indirectcopy.countCopy.copy = copy;
+  }
+
+  if(executeImmediately)
+    ExecuteIndirectReadback(commandBuffer, indirectcopy);
+  else
+    m_BakedCmdBufferInfo[m_LastCmdBufferID].indirectCopies.push_back(indirectcopy);
+
+  patch.alloc = alloc;
+  patch.buf = paramsbuf;
+
+  return patch;
+}
+
 void WrappedVulkan::ExecuteIndirectReadback(VkCommandBuffer commandBuffer,
                                             const VkIndirectRecordData &indirectcopy)
 {
