@@ -10757,12 +10757,30 @@ VkResult WrappedVulkan::vkCreateIndirectCommandsLayoutEXT(
     VkDevice device, const VkIndirectCommandsLayoutCreateInfoEXT *pCreateInfo,
     const VkAllocationCallbacks *, VkIndirectCommandsLayoutEXT *pIndirectCommandsLayout)
 {
+  if(!ObjDisp(device)->CreateIndirectCommandsLayoutEXT)
+  {
+    RDCERR("vkCreateIndirectCommandsLayoutEXT called without a driver dispatch pointer");
+    if(pIndirectCommandsLayout)
+      *pIndirectCommandsLayout = VK_NULL_HANDLE;
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
+
   VkIndirectCommandsLayoutCreateInfoEXT unwrapped = *pCreateInfo;
   unwrapped.pipelineLayout = Unwrap(unwrapped.pipelineLayout);
+
+  byte *tempMem = GetTempMemory(GetNextPatchSize(unwrapped.pNext));
+  UnwrapNextChain(m_State, "VkIndirectCommandsLayoutCreateInfoEXT", tempMem,
+                  (VkBaseInStructure *)&unwrapped);
 
   VkResult ret;
   SERIALISE_TIME_CALL(ret = ObjDisp(device)->CreateIndirectCommandsLayoutEXT(
                           Unwrap(device), &unwrapped, NULL, pIndirectCommandsLayout));
+
+  if(ret == VK_SUCCESS && *pIndirectCommandsLayout == VK_NULL_HANDLE)
+  {
+    RDCERR("vkCreateIndirectCommandsLayoutEXT returned VK_SUCCESS with a NULL handle");
+    return VK_ERROR_UNKNOWN;
+  }
 
   if(ret == VK_SUCCESS)
   {
@@ -10893,6 +10911,14 @@ VkResult WrappedVulkan::vkCreateIndirectExecutionSetEXT(
     VkDevice device, const VkIndirectExecutionSetCreateInfoEXT *pCreateInfo,
     const VkAllocationCallbacks *, VkIndirectExecutionSetEXT *pIndirectExecutionSet)
 {
+  if(!ObjDisp(device)->CreateIndirectExecutionSetEXT)
+  {
+    RDCERR("vkCreateIndirectExecutionSetEXT called without a driver dispatch pointer");
+    if(pIndirectExecutionSet)
+      *pIndirectExecutionSet = VK_NULL_HANDLE;
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
+
   VkIndirectExecutionSetCreateInfoEXT unwrapped = *pCreateInfo;
   VkIndirectExecutionSetPipelineInfoEXT pipelineInfo;
   VkIndirectExecutionSetShaderInfoEXT shaderInfo;
@@ -10942,6 +10968,12 @@ VkResult WrappedVulkan::vkCreateIndirectExecutionSetEXT(
   VkResult ret;
   SERIALISE_TIME_CALL(ret = ObjDisp(device)->CreateIndirectExecutionSetEXT(
                           Unwrap(device), &unwrapped, NULL, pIndirectExecutionSet));
+
+  if(ret == VK_SUCCESS && *pIndirectExecutionSet == VK_NULL_HANDLE)
+  {
+    RDCERR("vkCreateIndirectExecutionSetEXT returned VK_SUCCESS with a NULL handle");
+    return VK_ERROR_UNKNOWN;
+  }
 
   if(ret == VK_SUCCESS)
   {
@@ -11048,6 +11080,12 @@ void WrappedVulkan::vkUpdateIndirectExecutionSetPipelineEXT(
     VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet, uint32_t executionSetWriteCount,
     const VkWriteIndirectExecutionSetPipelineEXT *pExecutionSetWrites)
 {
+  if(!ObjDisp(device)->UpdateIndirectExecutionSetPipelineEXT)
+  {
+    RDCERR("vkUpdateIndirectExecutionSetPipelineEXT called without a driver dispatch pointer");
+    return;
+  }
+
   rdcarray<VkWriteIndirectExecutionSetPipelineEXT> unwrappedWrites;
   unwrappedWrites.resize(executionSetWriteCount);
 
@@ -11125,6 +11163,12 @@ void WrappedVulkan::vkUpdateIndirectExecutionSetShaderEXT(
     VkDevice device, VkIndirectExecutionSetEXT indirectExecutionSet, uint32_t executionSetWriteCount,
     const VkWriteIndirectExecutionSetShaderEXT *pExecutionSetWrites)
 {
+  if(!ObjDisp(device)->UpdateIndirectExecutionSetShaderEXT)
+  {
+    RDCERR("vkUpdateIndirectExecutionSetShaderEXT called without a driver dispatch pointer");
+    return;
+  }
+
   rdcarray<VkWriteIndirectExecutionSetShaderEXT> unwrappedWrites;
   unwrappedWrites.resize(executionSetWriteCount);
 
@@ -11220,6 +11264,14 @@ void WrappedVulkan::vkGetGeneratedCommandsMemoryRequirementsEXT(
     VkDevice device, const VkGeneratedCommandsMemoryRequirementsInfoEXT *pInfo,
     VkMemoryRequirements2 *pMemoryRequirements)
 {
+  if(!ObjDisp(device)->GetGeneratedCommandsMemoryRequirementsEXT)
+  {
+    RDCERR("vkGetGeneratedCommandsMemoryRequirementsEXT called without a driver dispatch pointer");
+    if(pMemoryRequirements)
+      *pMemoryRequirements = VkMemoryRequirements2{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+    return;
+  }
+
   VkGeneratedCommandsMemoryRequirementsInfoEXT unwrapped = *pInfo;
   unwrapped.indirectExecutionSet = Unwrap(unwrapped.indirectExecutionSet);
   unwrapped.indirectCommandsLayout = Unwrap(unwrapped.indirectCommandsLayout);
@@ -11294,6 +11346,12 @@ void WrappedVulkan::vkCmdPreprocessGeneratedCommandsEXT(
     VkCommandBuffer stateCommandBuffer)
 {
   SCOPED_DBG_SINK();
+
+  if(!ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT)
+  {
+    RDCERR("vkCmdPreprocessGeneratedCommandsEXT called without a driver dispatch pointer");
+    return;
+  }
 
   VkGeneratedCommandsInfoEXT unwrapped =
       UnwrapGeneratedCommandsInfoEXT(this, pGeneratedCommandsInfo);
@@ -11510,6 +11568,12 @@ void WrappedVulkan::vkCmdExecuteGeneratedCommandsEXT(
     const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo)
 {
   SCOPED_DBG_SINK();
+
+  if(!ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT)
+  {
+    RDCERR("vkCmdExecuteGeneratedCommandsEXT called without a driver dispatch pointer");
+    return;
+  }
 
   VkGeneratedCommandsInfoEXT unwrapped =
       UnwrapGeneratedCommandsInfoEXT(this, pGeneratedCommandsInfo);

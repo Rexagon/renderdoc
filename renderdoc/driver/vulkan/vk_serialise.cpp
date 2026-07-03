@@ -143,6 +143,7 @@ DECL_VKFLAG_EMPTY_EXT(VkDisplaySurfaceCreate, KHR);
 DECL_VKFLAG_EXT(VkExternalMemoryHandleType, NV);
 DECL_VKFLAG_EXT(VkExternalMemoryFeature, NV);
 DECL_VKFLAG_EXT(VkIndirectCommandsLayoutUsage, NV);
+DECL_VKFLAG_EXT(VkIndirectCommandsInputMode, EXT);
 DECL_VKFLAG_EXT(VkPerformanceCounterDescription, KHR);
 DECL_VKFLAG_EMPTY_EXT(VkPipelineCoverageModulationStateCreate, NV);
 DECL_VKFLAG_EMPTY_EXT(VkPipelineCoverageToColorStateCreate, NV);
@@ -671,6 +672,12 @@ SERIALISE_VK_HANDLES();
                VkDescriptorBufferBindingPushDescriptorBufferHandleEXT)                                 \
   PNEXT_STRUCT(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CAPTURE_DESCRIPTOR_DATA_INFO_EXT,              \
                VkAccelerationStructureCaptureDescriptorDataInfoEXT)                                    \
+                                                                                                       \
+  /* VK_EXT_device_generated_commands */                                                               \
+  PNEXT_STRUCT(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT,               \
+               VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT)                                     \
+  PNEXT_STRUCT(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT,             \
+               VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT)                                   \
                                                                                                        \
   /* VK_EXT_descriptor_indexing */                                                                     \
   PNEXT_STRUCT(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,                      \
@@ -1869,8 +1876,6 @@ SERIALISE_VK_HANDLES();
   PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT)                                           \
                                                                                                        \
   /* VK_EXT_device_generated_commands */                                                               \
-  PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT)          \
-  PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT)        \
   PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_GENERATED_COMMANDS_MEMORY_REQUIREMENTS_INFO_EXT)                 \
   PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_INDIRECT_EXECUTION_SET_CREATE_INFO_EXT)                          \
   PNEXT_UNSUPPORTED(VK_STRUCTURE_TYPE_GENERATED_COMMANDS_INFO_EXT)                                     \
@@ -10331,6 +10336,50 @@ void Deserialise(const VkPhysicalDeviceDescriptorBufferFeaturesEXT &el)
 }
 
 template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT &el)
+{
+  RDCASSERT(ser.IsReading() ||
+            el.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT);
+  SerialiseNext(ser, el.sType, el.pNext);
+
+  SERIALISE_MEMBER(deviceGeneratedCommands);
+  SERIALISE_MEMBER(dynamicGeneratedPipelineLayout);
+}
+
+template <>
+void Deserialise(const VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT &el)
+{
+  DeserialiseNext(el.pNext);
+}
+
+template <typename SerialiserType>
+void DoSerialise(SerialiserType &ser, VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT &el)
+{
+  RDCASSERT(ser.IsReading() ||
+            el.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT);
+  SerialiseNext(ser, el.sType, el.pNext);
+
+  SERIALISE_MEMBER(maxIndirectPipelineCount);
+  SERIALISE_MEMBER(maxIndirectShaderObjectCount);
+  SERIALISE_MEMBER(maxIndirectSequenceCount);
+  SERIALISE_MEMBER(maxIndirectCommandsTokenCount);
+  SERIALISE_MEMBER(maxIndirectCommandsTokenOffset);
+  SERIALISE_MEMBER(maxIndirectCommandsIndirectStride);
+  SERIALISE_MEMBER_TYPED(uint32_t, supportedIndirectCommandsInputModes);
+  SERIALISE_MEMBER_VKFLAGS(VkShaderStageFlags, supportedIndirectCommandsShaderStages);
+  SERIALISE_MEMBER_VKFLAGS(VkShaderStageFlags, supportedIndirectCommandsShaderStagesPipelineBinding);
+  SERIALISE_MEMBER_VKFLAGS(VkShaderStageFlags, supportedIndirectCommandsShaderStagesShaderBinding);
+  SERIALISE_MEMBER(deviceGeneratedCommandsTransformFeedback);
+  SERIALISE_MEMBER(deviceGeneratedCommandsMultiDrawIndirectCount);
+}
+
+template <>
+void Deserialise(const VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT &el)
+{
+  DeserialiseNext(el.pNext);
+}
+
+template <typename SerialiserType>
 void DoSerialise(SerialiserType &ser, VkPhysicalDeviceDescriptorBufferDensityMapPropertiesEXT &el)
 {
   RDCASSERT(ser.IsReading() ||
@@ -15113,6 +15162,8 @@ INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDescriptorBufferFeaturesEXT);
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDescriptorBufferPropertiesEXT);
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDescriptorIndexingFeatures)
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDescriptorIndexingProperties)
+INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT);
+INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT);
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDiscardRectanglePropertiesEXT);
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDriverProperties);
 INSTANTIATE_SERIALISE_TYPE(VkPhysicalDeviceDynamicRenderingFeatures);
