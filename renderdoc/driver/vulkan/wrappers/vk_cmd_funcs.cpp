@@ -10496,6 +10496,9 @@ static VkDeviceSize SizeForDGCToken(const VkGeneratedCommandsLayoutTokenData &to
   switch(token.type)
   {
     case VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT: return token.pushRange.size;
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT: return token.pushRange.size;
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT: return token.pushRange.size;
+    case VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT: return token.pushRange.size;
     case VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT:
       return sizeof(VkBindIndexBufferIndirectCommandEXT);
     case VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT:
@@ -10531,6 +10534,19 @@ static ActionFlags ActionFlagsForDGCAction(VkGeneratedCommandsActionType actionT
              ActionFlags::Indirect;
     case VkGeneratedCommandsActionType::Dispatch:
       return ActionFlags::Dispatch | ActionFlags::Indirect;
+    default: break;
+  }
+
+  return ActionFlags::Indirect;
+}
+
+static ActionFlags CallbackFlagsForDGCAction(VkGeneratedCommandsActionType actionType)
+{
+  switch(actionType)
+  {
+    case VkGeneratedCommandsActionType::Draw:
+    case VkGeneratedCommandsActionType::DrawIndexed: return ActionFlags::Drawcall;
+    case VkGeneratedCommandsActionType::Dispatch: return ActionFlags::Dispatch;
     default: break;
   }
 
@@ -10583,7 +10599,11 @@ static void FillDGCLayoutData(VkGeneratedCommandsLayoutData &layout,
     dst.type = src.type;
     dst.offset = src.offset;
 
-    if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT && src.data.pPushConstant)
+    if((src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT ||
+        src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT ||
+        src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT ||
+        src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT) &&
+       src.data.pPushConstant)
       dst.pushRange = src.data.pPushConstant->updateRange;
     else if(src.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT &&
             src.data.pVertexBuffer)
@@ -10651,7 +10671,10 @@ bool WrappedVulkan::Serialise_vkCreateIndirectCommandsLayoutEXT(
       execSetTypeStorage[i] = VK_INDIRECT_EXECUTION_SET_INFO_TYPE_MAX_ENUM_EXT;
       execStageStorage[i] = 0;
 
-      if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT &&
+      if((token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT ||
+          token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT ||
+          token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT ||
+          token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT) &&
          token.data.pPushConstant)
       {
         pushStageStorage[i] = token.data.pPushConstant->updateRange.stageFlags;
@@ -10707,11 +10730,77 @@ bool WrappedVulkan::Serialise_vkCreateIndirectCommandsLayoutEXT(
 
   if(IsReplayingAndReading())
   {
-    VkIndirectCommandsLayoutEXT layoutHandle =
-        GetResourceManager()->CreateDeferredHandle<VkIndirectCommandsLayoutEXT>();
+    rdcarray<VkIndirectCommandsLayoutTokenEXT> replayTokens;
+    rdcarray<VkIndirectCommandsPushConstantTokenEXT> pushConstantTokens;
+    rdcarray<VkIndirectCommandsVertexBufferTokenEXT> vertexBufferTokens;
+    rdcarray<VkIndirectCommandsIndexBufferTokenEXT> indexBufferTokens;
+    rdcarray<VkIndirectCommandsExecutionSetTokenEXT> executionSetTokens;
 
-    ResourceId live = GetResourceManager()->WrapResource(IndirectCommandsLayout, Unwrap(device),
-                                                         layoutHandle);
+    replayTokens.resize(TokenCount);
+    pushConstantTokens.resize(TokenCount);
+    vertexBufferTokens.resize(TokenCount);
+    indexBufferTokens.resize(TokenCount);
+    executionSetTokens.resize(TokenCount);
+
+    for(uint32_t i = 0; i < TokenCount; i++)
+    {
+      VkIndirectCommandsLayoutTokenEXT &token = replayTokens[i];
+      token = {VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_TOKEN_EXT};
+      token.type = (VkIndirectCommandsTokenTypeEXT)TokenTypes[i];
+      token.offset = TokenOffsets[i];
+
+      if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT ||
+         token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT ||
+         token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT ||
+         token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT)
+      {
+        pushConstantTokens[i].updateRange.stageFlags = PushStageFlags[i];
+        pushConstantTokens[i].updateRange.offset = PushOffsets[i];
+        pushConstantTokens[i].updateRange.size = PushSizes[i];
+        token.data.pPushConstant = &pushConstantTokens[i];
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_EXT)
+      {
+        vertexBufferTokens[i].vertexBindingUnit = VertexBindings[i];
+        token.data.pVertexBuffer = &vertexBufferTokens[i];
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT)
+      {
+        indexBufferTokens[i].mode = (VkIndirectCommandsInputModeFlagBitsEXT)IndexModes[i];
+        token.data.pIndexBuffer = &indexBufferTokens[i];
+      }
+      else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_EXECUTION_SET_EXT)
+      {
+        executionSetTokens[i].type = (VkIndirectExecutionSetInfoTypeEXT)ExecutionSetTypes[i];
+        executionSetTokens[i].shaderStages = ExecutionSetStages[i];
+        token.data.pExecutionSet = &executionSetTokens[i];
+      }
+    }
+
+    VkIndirectCommandsLayoutCreateInfoEXT createInfo = {
+        VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_CREATE_INFO_EXT};
+    createInfo.flags = Flags;
+    createInfo.shaderStages = ShaderStages;
+    createInfo.indirectStride = IndirectStride;
+    createInfo.pipelineLayout = Unwrap(PipelineLayout);
+    createInfo.tokenCount = TokenCount;
+    createInfo.pTokens = replayTokens.data();
+
+    VkIndirectCommandsLayoutEXT layoutHandle = VK_NULL_HANDLE;
+    VkResult ret = ObjDisp(device)->CreateIndirectCommandsLayoutEXT(Unwrap(device), &createInfo,
+                                                                    NULL, &layoutHandle);
+
+    if(ret != VK_SUCCESS)
+    {
+      SET_ERROR_RESULT(m_FailedReplayResult, ResultCode::APIReplayFailed,
+                       "Failed creating indirect commands layout, VkResult: %s",
+                       ToStr(ret).c_str());
+      return false;
+    }
+
+    GetResourceManager()->OverrideWrapper(ToTypedHandle(layoutHandle));
+    ResourceId live =
+        GetResourceManager()->WrapResource(IndirectCommandsLayout, Unwrap(device), layoutHandle);
 
     AddResource(IndirectCommandsLayout, ResourceType::ShaderBinding, "Indirect Commands Layout");
     DerivedResource(device, IndirectCommandsLayout);
@@ -10887,8 +10976,54 @@ bool WrappedVulkan::Serialise_vkCreateIndirectExecutionSetEXT(
 
   if(IsReplayingAndReading())
   {
-    VkIndirectExecutionSetEXT executionSet =
-        GetResourceManager()->CreateDeferredHandle<VkIndirectExecutionSetEXT>();
+    VkIndirectExecutionSetEXT executionSet = VK_NULL_HANDLE;
+    VkIndirectExecutionSetCreateInfoEXT createInfo = {
+        VK_STRUCTURE_TYPE_INDIRECT_EXECUTION_SET_CREATE_INFO_EXT};
+    createInfo.type = (VkIndirectExecutionSetInfoTypeEXT)type;
+
+    VkIndirectExecutionSetPipelineInfoEXT pipelineInfo = {
+        VK_STRUCTURE_TYPE_INDIRECT_EXECUTION_SET_PIPELINE_INFO_EXT};
+    VkIndirectExecutionSetShaderInfoEXT shaderInfo = {
+        VK_STRUCTURE_TYPE_INDIRECT_EXECUTION_SET_SHADER_INFO_EXT};
+    rdcarray<VkShaderEXT> unwrappedShaders;
+
+    if(type == (uint32_t)VK_INDIRECT_EXECUTION_SET_INFO_TYPE_PIPELINES_EXT)
+    {
+      pipelineInfo.initialPipeline = Unwrap(initialPipeline);
+      pipelineInfo.maxPipelineCount = maxPipelineCount;
+      createInfo.info.pPipelineInfo = &pipelineInfo;
+    }
+    else if(type == (uint32_t)VK_INDIRECT_EXECUTION_SET_INFO_TYPE_SHADER_OBJECTS_EXT)
+    {
+      unwrappedShaders.resize(shaderCount);
+      for(uint32_t i = 0; i < shaderCount; i++)
+        unwrappedShaders[i] = Unwrap(initialShaders[i]);
+
+      shaderInfo.shaderCount = shaderCount;
+      shaderInfo.pInitialShaders = unwrappedShaders.data();
+      shaderInfo.maxShaderCount = maxShaderCount;
+      shaderInfo.pushConstantRangeCount = pushConstantRangeCount;
+      shaderInfo.pPushConstantRanges = pushConstantRanges;
+      createInfo.info.pShaderInfo = &shaderInfo;
+    }
+    else
+    {
+      SET_ERROR_RESULT(m_FailedReplayResult, ResultCode::APIReplayFailed,
+                       "Unsupported indirect execution set type %u", type);
+      return false;
+    }
+
+    VkResult ret = ObjDisp(device)->CreateIndirectExecutionSetEXT(Unwrap(device), &createInfo, NULL,
+                                                                  &executionSet);
+
+    if(ret != VK_SUCCESS)
+    {
+      SET_ERROR_RESULT(m_FailedReplayResult, ResultCode::APIReplayFailed,
+                       "Failed creating indirect execution set, VkResult: %s", ToStr(ret).c_str());
+      return false;
+    }
+
+    GetResourceManager()->OverrideWrapper(ToTypedHandle(executionSet));
 
     ResourceId live =
         GetResourceManager()->WrapResource(IndirectExecutionSet, Unwrap(device), executionSet);
@@ -11066,6 +11201,25 @@ bool WrappedVulkan::Serialise_vkUpdateIndirectExecutionSetPipelineEXT(
 
   if(IsReplayingAndReading())
   {
+    rdcarray<VkWriteIndirectExecutionSetPipelineEXT> writes;
+    writes.resize(executionSetWriteCount);
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+    {
+      writes[i] = {VK_STRUCTURE_TYPE_WRITE_INDIRECT_EXECUTION_SET_PIPELINE_EXT};
+      writes[i].index = Indices[i];
+      writes[i].pipeline = Unwrap(Pipelines[i]);
+    }
+
+    if(executionSetWriteCount > 0)
+    {
+      if(ObjDisp(device)->UpdateIndirectExecutionSetPipelineEXT)
+        ObjDisp(device)->UpdateIndirectExecutionSetPipelineEXT(
+            Unwrap(device), Unwrap(indirectExecutionSet), executionSetWriteCount, writes.data());
+      else
+        RDCERR("vkUpdateIndirectExecutionSetPipelineEXT replayed without a driver dispatch pointer");
+    }
+
     ResourceId executionSetId = GetResID(indirectExecutionSet);
     DerivedResource(device, executionSetId);
     for(uint32_t i = 0; i < executionSetWriteCount; i++)
@@ -11149,6 +11303,25 @@ bool WrappedVulkan::Serialise_vkUpdateIndirectExecutionSetShaderEXT(
 
   if(IsReplayingAndReading())
   {
+    rdcarray<VkWriteIndirectExecutionSetShaderEXT> writes;
+    writes.resize(executionSetWriteCount);
+
+    for(uint32_t i = 0; i < executionSetWriteCount; i++)
+    {
+      writes[i] = {VK_STRUCTURE_TYPE_WRITE_INDIRECT_EXECUTION_SET_SHADER_EXT};
+      writes[i].index = Indices[i];
+      writes[i].shader = Unwrap(Shaders[i]);
+    }
+
+    if(executionSetWriteCount > 0)
+    {
+      if(ObjDisp(device)->UpdateIndirectExecutionSetShaderEXT)
+        ObjDisp(device)->UpdateIndirectExecutionSetShaderEXT(
+            Unwrap(device), Unwrap(indirectExecutionSet), executionSetWriteCount, writes.data());
+      else
+        RDCERR("vkUpdateIndirectExecutionSetShaderEXT replayed without a driver dispatch pointer");
+    }
+
     ResourceId executionSetId = GetResID(indirectExecutionSet);
     DerivedResource(device, executionSetId);
     for(uint32_t i = 0; i < executionSetWriteCount; i++)
@@ -11292,11 +11465,110 @@ static VkGeneratedCommandsInfoEXT UnwrapGeneratedCommandsInfoEXT(
   return unwrapped;
 }
 
+static void ExtractGeneratedCommandsPNext(const void *pNext, uint32_t &pNextType,
+                                          VkPipeline &pipeline, uint32_t &shaderCount,
+                                          const VkShaderEXT *&shaders)
+{
+  pNextType = 0;
+  pipeline = VK_NULL_HANDLE;
+  shaderCount = 0;
+  shaders = NULL;
+
+  for(const VkBaseInStructure *next = (const VkBaseInStructure *)pNext; next; next = next->pNext)
+  {
+    if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT)
+    {
+      const VkGeneratedCommandsPipelineInfoEXT *info =
+          (const VkGeneratedCommandsPipelineInfoEXT *)next;
+      pNextType = (uint32_t)next->sType;
+      pipeline = info->pipeline;
+      return;
+    }
+    else if(next->sType == VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT)
+    {
+      const VkGeneratedCommandsShaderInfoEXT *info = (const VkGeneratedCommandsShaderInfoEXT *)next;
+      pNextType = (uint32_t)next->sType;
+      shaderCount = info->shaderCount;
+      shaders = info->pShaders;
+      return;
+    }
+  }
+}
+
+static VkGeneratedCommandsInfoEXT MakeGeneratedCommandsInfoEXT(
+    VkShaderStageFlags shaderStages, VkIndirectExecutionSetEXT indirectExecutionSet,
+    VkIndirectCommandsLayoutEXT indirectCommandsLayout, VkDeviceAddress indirectAddress,
+    VkDeviceSize indirectAddressSize, VkDeviceAddress preprocessAddress,
+    VkDeviceSize preprocessSize, uint32_t maxSequenceCount, VkDeviceAddress sequenceCountAddress,
+    uint32_t maxDrawCount)
+{
+  VkGeneratedCommandsInfoEXT info = {VK_STRUCTURE_TYPE_GENERATED_COMMANDS_INFO_EXT};
+  info.shaderStages = shaderStages;
+  info.indirectExecutionSet = indirectExecutionSet;
+  info.indirectCommandsLayout = indirectCommandsLayout;
+  info.indirectAddress = indirectAddress;
+  info.indirectAddressSize = indirectAddressSize;
+  info.preprocessAddress = preprocessAddress;
+  info.preprocessSize = preprocessSize;
+  info.maxSequenceCount = maxSequenceCount;
+  info.sequenceCountAddress = sequenceCountAddress;
+  info.maxDrawCount = maxDrawCount;
+  return info;
+}
+
+static void ChainGeneratedCommandsPNext(VkGeneratedCommandsInfoEXT &info, uint32_t pNextType,
+                                        VkPipeline pipeline, uint32_t shaderCount,
+                                        const VkShaderEXT *shaders,
+                                        VkGeneratedCommandsPipelineInfoEXT &pipelineInfo,
+                                        VkGeneratedCommandsShaderInfoEXT &shaderInfo)
+{
+  info.pNext = NULL;
+
+  if(pNextType == (uint32_t)VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT)
+  {
+    pipelineInfo = {VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT};
+    pipelineInfo.pipeline = pipeline;
+    info.pNext = &pipelineInfo;
+  }
+  else if(pNextType == (uint32_t)VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT)
+  {
+    shaderInfo = {VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT};
+    shaderInfo.shaderCount = shaderCount;
+    shaderInfo.pShaders = shaders;
+    info.pNext = &shaderInfo;
+  }
+}
+
 template <typename SerialiserType>
 bool WrappedVulkan::Serialise_vkCmdPreprocessGeneratedCommandsEXT(
     SerialiserType &ser, VkCommandBuffer commandBuffer,
     const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo, VkCommandBuffer stateCommandBuffer)
 {
+  uint32_t GeneratedPNextType = 0;
+  VkPipeline GeneratedPNextPipeline = VK_NULL_HANDLE;
+  uint32_t GeneratedPNextShaderCount = 0;
+  const VkShaderEXT *GeneratedPNextShaders = NULL;
+  rdcarray<VkShaderEXT> generatedPNextShadersStorage;
+
+  if(ser.IsWriting())
+  {
+    ExtractGeneratedCommandsPNext(pGeneratedCommandsInfo ? pGeneratedCommandsInfo->pNext : NULL,
+                                  GeneratedPNextType, GeneratedPNextPipeline,
+                                  GeneratedPNextShaderCount, GeneratedPNextShaders);
+
+    if(GeneratedPNextShaderCount > 0 && GeneratedPNextShaders)
+    {
+      generatedPNextShadersStorage.resize(GeneratedPNextShaderCount);
+      for(uint32_t i = 0; i < GeneratedPNextShaderCount; i++)
+        generatedPNextShadersStorage[i] = GeneratedPNextShaders[i];
+      GeneratedPNextShaders = generatedPNextShadersStorage.data();
+    }
+    else
+    {
+      GeneratedPNextShaderCount = 0;
+    }
+  }
+
   SERIALISE_ELEMENT(commandBuffer);
   SERIALISE_ELEMENT_LOCAL(ShaderStages,
                           pGeneratedCommandsInfo ? pGeneratedCommandsInfo->shaderStages : 0);
@@ -11329,6 +11601,10 @@ bool WrappedVulkan::Serialise_vkCmdPreprocessGeneratedCommandsEXT(
       .OffsetOrSize();
   SERIALISE_ELEMENT_LOCAL(MaxDrawCount,
                           pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxDrawCount : 0);
+  SERIALISE_ELEMENT(GeneratedPNextType);
+  SERIALISE_ELEMENT(GeneratedPNextPipeline).Important();
+  SERIALISE_ELEMENT(GeneratedPNextShaderCount);
+  SERIALISE_ELEMENT_ARRAY(GeneratedPNextShaders, GeneratedPNextShaderCount).Important();
   SERIALISE_ELEMENT(stateCommandBuffer);
 
   Serialise_DebugMessages(ser);
@@ -11336,7 +11612,66 @@ bool WrappedVulkan::Serialise_vkCmdPreprocessGeneratedCommandsEXT(
   SERIALISE_CHECK_READ_ERRORS();
 
   if(IsReplayingAndReading())
+  {
     m_LastCmdBufferID = GetResID(commandBuffer);
+
+    if(IsActiveReplaying(m_State))
+    {
+      if(InRerecordRange(m_LastCmdBufferID))
+      {
+        commandBuffer = RerecordCmdBuf(m_LastCmdBufferID);
+
+        VkCommandBuffer replayStateCommandBuffer = stateCommandBuffer;
+        if(stateCommandBuffer != VK_NULL_HANDLE)
+        {
+          ResourceId stateCmdId = GetResID(stateCommandBuffer);
+          if(stateCmdId == m_LastCmdBufferID)
+            replayStateCommandBuffer = commandBuffer;
+          else if(HasRerecordCmdBuf(stateCmdId))
+            replayStateCommandBuffer = RerecordCmdBuf(stateCmdId);
+        }
+
+        VkGeneratedCommandsInfoEXT generatedInfo = MakeGeneratedCommandsInfoEXT(
+            ShaderStages, IndirectExecutionSet, IndirectCommandsLayout, IndirectAddress,
+            IndirectAddressSize, PreprocessAddress, PreprocessSize, MaxSequenceCount,
+            SequenceCountAddress, MaxDrawCount);
+        VkGeneratedCommandsPipelineInfoEXT pipelineInfo = {};
+        VkGeneratedCommandsShaderInfoEXT shaderInfo = {};
+        ChainGeneratedCommandsPNext(generatedInfo, GeneratedPNextType, GeneratedPNextPipeline,
+                                    GeneratedPNextShaderCount, GeneratedPNextShaders, pipelineInfo,
+                                    shaderInfo);
+
+        VkGeneratedCommandsInfoEXT unwrapped =
+            UnwrapGeneratedCommandsInfoEXT(this, &generatedInfo);
+
+        if(ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT)
+          ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT(
+              Unwrap(commandBuffer), &unwrapped, Unwrap(replayStateCommandBuffer));
+        else
+          RDCERR("vkCmdPreprocessGeneratedCommandsEXT replayed without a driver dispatch pointer");
+      }
+
+      return true;
+    }
+
+    VkGeneratedCommandsInfoEXT generatedInfo = MakeGeneratedCommandsInfoEXT(
+        ShaderStages, IndirectExecutionSet, IndirectCommandsLayout, IndirectAddress,
+        IndirectAddressSize, PreprocessAddress, PreprocessSize, MaxSequenceCount,
+        SequenceCountAddress, MaxDrawCount);
+    VkGeneratedCommandsPipelineInfoEXT pipelineInfo = {};
+    VkGeneratedCommandsShaderInfoEXT shaderInfo = {};
+    ChainGeneratedCommandsPNext(generatedInfo, GeneratedPNextType, GeneratedPNextPipeline,
+                                GeneratedPNextShaderCount, GeneratedPNextShaders, pipelineInfo,
+                                shaderInfo);
+
+    VkGeneratedCommandsInfoEXT unwrapped = UnwrapGeneratedCommandsInfoEXT(this, &generatedInfo);
+
+    if(ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT)
+      ObjDisp(commandBuffer)->CmdPreprocessGeneratedCommandsEXT(
+          Unwrap(commandBuffer), &unwrapped, Unwrap(stateCommandBuffer));
+    else
+      RDCERR("vkCmdPreprocessGeneratedCommandsEXT replayed without a driver dispatch pointer");
+  }
 
   return true;
 }
@@ -11392,6 +11727,31 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
     SerialiserType &ser, VkCommandBuffer commandBuffer, VkBool32 isPreprocessed,
     const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo)
 {
+  uint32_t GeneratedPNextType = 0;
+  VkPipeline GeneratedPNextPipeline = VK_NULL_HANDLE;
+  uint32_t GeneratedPNextShaderCount = 0;
+  const VkShaderEXT *GeneratedPNextShaders = NULL;
+  rdcarray<VkShaderEXT> generatedPNextShadersStorage;
+
+  if(ser.IsWriting())
+  {
+    ExtractGeneratedCommandsPNext(pGeneratedCommandsInfo ? pGeneratedCommandsInfo->pNext : NULL,
+                                  GeneratedPNextType, GeneratedPNextPipeline,
+                                  GeneratedPNextShaderCount, GeneratedPNextShaders);
+
+    if(GeneratedPNextShaderCount > 0 && GeneratedPNextShaders)
+    {
+      generatedPNextShadersStorage.resize(GeneratedPNextShaderCount);
+      for(uint32_t i = 0; i < GeneratedPNextShaderCount; i++)
+        generatedPNextShadersStorage[i] = GeneratedPNextShaders[i];
+      GeneratedPNextShaders = generatedPNextShadersStorage.data();
+    }
+    else
+    {
+      GeneratedPNextShaderCount = 0;
+    }
+  }
+
   SERIALISE_ELEMENT(commandBuffer);
   SERIALISE_ELEMENT(isPreprocessed);
   SERIALISE_ELEMENT_LOCAL(ShaderStages,
@@ -11425,6 +11785,10 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
       .OffsetOrSize();
   SERIALISE_ELEMENT_LOCAL(MaxDrawCount,
                           pGeneratedCommandsInfo ? pGeneratedCommandsInfo->maxDrawCount : 0);
+  SERIALISE_ELEMENT(GeneratedPNextType);
+  SERIALISE_ELEMENT(GeneratedPNextPipeline).Important();
+  SERIALISE_ELEMENT(GeneratedPNextShaderCount);
+  SERIALISE_ELEMENT_ARRAY(GeneratedPNextShaders, GeneratedPNextShaderCount).Important();
 
   Serialise_DebugMessages(ser);
 
@@ -11435,7 +11799,90 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
     m_LastCmdBufferID = GetResID(commandBuffer);
 
     if(IsActiveReplaying(m_State))
+    {
+      uint32_t countEventsReplayed = 0;
+      if(MaxSequenceCount > 0)
+      {
+        countEventsReplayed = MaxSequenceCount + 1;
+
+        ActionUse use(m_CurChunkOffset, 0);
+        auto it = std::lower_bound(m_ActionUses.begin(), m_ActionUses.end(), use);
+        if(it != m_ActionUses.end() && it->fileOffset == m_CurChunkOffset &&
+           it->eventId < m_Actions.size() && m_Actions[it->eventId])
+        {
+          const ActionDescription *action = m_Actions[it->eventId];
+          if(action->flags & ActionFlags::PushMarker)
+            countEventsReplayed = (uint32_t)action->children.size() + 1;
+        }
+      }
+
+      if(InRerecordRange(m_LastCmdBufferID))
+      {
+        commandBuffer = RerecordCmdBuf(m_LastCmdBufferID);
+
+        VkGeneratedCommandsInfoEXT generatedInfo = MakeGeneratedCommandsInfoEXT(
+            ShaderStages, IndirectExecutionSet, IndirectCommandsLayout, IndirectAddress,
+            IndirectAddressSize, PreprocessAddress, PreprocessSize, MaxSequenceCount,
+            SequenceCountAddress, MaxDrawCount);
+        VkGeneratedCommandsPipelineInfoEXT pipelineInfo = {};
+        VkGeneratedCommandsShaderInfoEXT shaderInfo = {};
+        ChainGeneratedCommandsPNext(generatedInfo, GeneratedPNextType, GeneratedPNextPipeline,
+                                    GeneratedPNextShaderCount, GeneratedPNextShaders, pipelineInfo,
+                                    shaderInfo);
+
+        VkGeneratedCommandsInfoEXT unwrapped =
+            UnwrapGeneratedCommandsInfoEXT(this, &generatedInfo);
+
+        ResourceId layoutId = GetResID(IndirectCommandsLayout);
+        VkGeneratedCommandsLayoutData layout;
+        if(m_IndirectCommandsLayoutsEXT.find(layoutId) != m_IndirectCommandsLayoutsEXT.end())
+          layout = m_IndirectCommandsLayoutsEXT[layoutId];
+
+        ActionFlags callbackFlags = CallbackFlagsForDGCAction(layout.actionType);
+        uint32_t eventId = HandlePreCallback(commandBuffer, callbackFlags);
+
+        if(ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT)
+        {
+          ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT(
+              Unwrap(commandBuffer), isPreprocessed, &unwrapped);
+
+          if(eventId && callbackFlags == ActionFlags::Dispatch &&
+             m_ActionCallback->PostDispatch(eventId, callbackFlags, commandBuffer))
+          {
+            ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT(
+                Unwrap(commandBuffer), isPreprocessed, &unwrapped);
+            m_ActionCallback->PostRedispatch(eventId, callbackFlags, commandBuffer);
+          }
+          else if(eventId &&
+                  (callbackFlags == ActionFlags::Drawcall ||
+                   callbackFlags == ActionFlags::MeshDispatch) &&
+                  m_ActionCallback->PostDraw(eventId, callbackFlags, commandBuffer))
+          {
+            ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT(
+                Unwrap(commandBuffer), isPreprocessed, &unwrapped);
+            m_ActionCallback->PostRedraw(eventId, callbackFlags, commandBuffer);
+          }
+          else if(eventId)
+          {
+            m_ActionCallback->PostRemisc(eventId, callbackFlags, commandBuffer);
+          }
+        }
+        else
+        {
+          RDCERR("vkCmdExecuteGeneratedCommandsEXT replayed without a driver dispatch pointer");
+        }
+      }
+
+      if(countEventsReplayed > 0)
+      {
+        if(m_FirstEventID > 1)
+          m_RootEventID += countEventsReplayed;
+        else
+          m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID += countEventsReplayed;
+      }
+
       return true;
+    }
 
     ResourceId layoutId = GetResID(IndirectCommandsLayout);
     VkGeneratedCommandsLayoutData layout;
@@ -11443,9 +11890,16 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
       layout = m_IndirectCommandsLayoutsEXT[layoutId];
 
     const VkDeviceSize stride = MinimumDGCStride(layout);
+    const bool hasSequenceCount = SequenceCountAddress != 0;
+    uint32_t reservedSequenceCount = MaxSequenceCount;
+    if(hasSequenceCount && MaxSequenceCount > 0)
+      reservedSequenceCount = 1;
+
     VkDeviceSize dataSize = IndirectAddressSize;
     if(dataSize == 0 && stride != 0)
       dataSize = stride * MaxSequenceCount;
+    if(hasSequenceCount && dataSize != 0 && stride != 0)
+      dataSize = RDCMIN(dataSize, stride * reservedSequenceCount);
 
     ResourceId indirectBufferId;
     uint64_t indirectOffset = 0;
@@ -11476,6 +11930,30 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
     VkGeneratedCommandsPatchData generatedPatch = FetchGeneratedCommandsData(
         commandBuffer, layoutId, indirectBuffer, indirectOffset, dataSize, MaxSequenceCount,
         (uint32_t)stride, countBuffer, countOffset, executeImmediately);
+
+    if(SequenceCountAddress != 0)
+      generatedPatch.hasCount = true;
+
+    generatedPatch.maxCount = MaxSequenceCount;
+    generatedPatch.count = reservedSequenceCount;
+
+    VkGeneratedCommandsInfoEXT generatedInfo = MakeGeneratedCommandsInfoEXT(
+        ShaderStages, IndirectExecutionSet, IndirectCommandsLayout, IndirectAddress,
+        IndirectAddressSize, PreprocessAddress, PreprocessSize, MaxSequenceCount,
+        SequenceCountAddress, MaxDrawCount);
+    VkGeneratedCommandsPipelineInfoEXT pipelineInfo = {};
+    VkGeneratedCommandsShaderInfoEXT shaderInfo = {};
+    ChainGeneratedCommandsPNext(generatedInfo, GeneratedPNextType, GeneratedPNextPipeline,
+                                GeneratedPNextShaderCount, GeneratedPNextShaders, pipelineInfo,
+                                shaderInfo);
+
+    VkGeneratedCommandsInfoEXT unwrapped = UnwrapGeneratedCommandsInfoEXT(this, &generatedInfo);
+
+    if(ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT)
+      ObjDisp(commandBuffer)->CmdExecuteGeneratedCommandsEXT(
+          Unwrap(commandBuffer), isPreprocessed, &unwrapped);
+    else
+      RDCERR("vkCmdExecuteGeneratedCommandsEXT replayed without a driver dispatch pointer");
 
     rdcstr name = "vkCmdExecuteGeneratedCommandsEXT";
     SDChunk *baseChunk = m_StructuredFile->chunks.back();
@@ -11519,7 +11997,7 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
 
     m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID++;
 
-    for(uint32_t i = 0; i < MaxSequenceCount; i++)
+    for(uint32_t i = 0; i < reservedSequenceCount; i++)
     {
       ActionDescription multi;
       multi.customName = name;
@@ -11532,7 +12010,7 @@ bool WrappedVulkan::Serialise_vkCmdExecuteGeneratedCommandsEXT(
       {
         StructuredSerialiser structuriser(fakeChunk, ser.GetChunkLookup());
 
-        structuriser.Serialise<uint32_t>("sequenceIndex"_lit, 0U);
+        structuriser.Serialise<uint32_t>("sequenceIndex"_lit, i);
         structuriser.Serialise("layout"_lit, layoutId);
         structuriser.Serialise("buffer"_lit, indirectBufferId);
         structuriser.Serialise("offset"_lit, indirectOffset).OffsetOrSize();

@@ -648,7 +648,10 @@ static VkDeviceSize GeneratedCommandStride(const VkGeneratedCommandsLayoutData &
   {
     VkDeviceSize tokenSize = 0;
 
-    if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT)
+    if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT ||
+       token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT ||
+       token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT ||
+       token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT)
       tokenSize = token.pushRange.size;
     else if(token.type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_EXT)
       tokenSize = sizeof(VkBindIndexBufferIndirectCommandEXT);
@@ -896,7 +899,10 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
       byte *ptr = argbuf.size() ? argbuf.begin() : NULL;
       byte *end = argbuf.size() ? argbuf.end() : NULL;
 
-      uint32_t sequenceCount = n.generatedPatch.count;
+      uint32_t reservedSequenceCount = n.generatedPatch.count;
+      uint32_t maxSequenceCount =
+          n.generatedPatch.maxCount != 0 ? n.generatedPatch.maxCount : reservedSequenceCount;
+      uint32_t sequenceCount = reservedSequenceCount;
       if(n.generatedPatch.hasCount)
       {
         if(argbuf.size() >= 16)
@@ -910,22 +916,45 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
           RDCERR("Couldn't get generated command sequence count");
         }
 
-        if(sequenceCount > n.generatedPatch.count)
+        if(sequenceCount > maxSequenceCount)
         {
           RDCERR("Generated command sequence count higher than maxSequenceCount, clamping");
-          sequenceCount = n.generatedPatch.count;
+          sequenceCount = maxSequenceCount;
         }
       }
 
-      int32_t eidShift = int32_t(sequenceCount) - int32_t(n.generatedPatch.count);
+      size_t generatedNodeCount = 0;
+      for(size_t child = i + 1;
+          child < cmdBufNodes.size() && generatedNodeCount < reservedSequenceCount; child++)
+      {
+        if(cmdBufNodes[child].action.flags & ActionFlags::PopMarker)
+          break;
+
+        generatedNodeCount++;
+      }
+
+      if(generatedNodeCount < reservedSequenceCount)
+      {
+        RDCERR("Generated command action tree had fewer sub-command nodes than expected");
+        reservedSequenceCount = (uint32_t)generatedNodeCount;
+        sequenceCount = RDCMIN(sequenceCount, (uint32_t)generatedNodeCount);
+      }
+
+      if(sequenceCount > reservedSequenceCount && reservedSequenceCount == 0)
+      {
+        RDCERR("Generated command count required sub-command clones but no placeholder was reserved");
+        sequenceCount = 0;
+      }
+
+      int32_t eidShift = int32_t(sequenceCount) - int32_t(reservedSequenceCount);
       totalEIDShift += eidShift;
 
       if(eidShift != 0)
       {
-        uint32_t popEvent = n.action.eventId + n.generatedPatch.count + 1;
+        uint32_t popEvent = n.action.eventId + reservedSequenceCount + 1;
         ShiftSuccessiveCommandNodes(popEvent, eidShift);
 
-        size_t firstShiftedNode = i + n.generatedPatch.count + 1;
+        size_t firstShiftedNode = i + reservedSequenceCount + 1;
         for(size_t j = firstShiftedNode; j < cmdBufNodes.size(); j++)
         {
           cmdBufNodes[j].action.eventId += eidShift;
@@ -944,8 +973,80 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
             cmdBufInfo.debugMessages[j].eventId += eidShift;
         }
 
-        if(sequenceCount < n.generatedPatch.count)
-          cmdBufNodes.erase(i + sequenceCount + 1, n.generatedPatch.count - sequenceCount);
+        if(sequenceCount == 0 && reservedSequenceCount > 0)
+        {
+          n.action.flags |= cmdBufNodes[i + 1].action.flags;
+          n.resourceUsage.swap(cmdBufNodes[i + 1].resourceUsage);
+          for(rdcpair<ResourceId, EventUsage> &use : n.resourceUsage)
+            use.second.eventId += eidShift;
+          for(const rdcpair<ResourceId, EventUsage> &use : cmdBufNodes[i + 1].resourceUsage)
+            n.resourceUsage.push_back(use);
+
+          cmdBufNodes.erase(i + 1, reservedSequenceCount);
+        }
+        else if(sequenceCount < reservedSequenceCount)
+        {
+          size_t eraseStart = i + sequenceCount + 1;
+          size_t eraseCount = (size_t)reservedSequenceCount - sequenceCount;
+
+          if(eraseStart < cmdBufNodes.size())
+            cmdBufNodes.erase(eraseStart, RDCMIN(eraseCount, cmdBufNodes.size() - eraseStart));
+        }
+        else if(sequenceCount > reservedSequenceCount)
+        {
+          if(reservedSequenceCount == 0 || i + reservedSequenceCount >= cmdBufNodes.size())
+          {
+            RDCERR("Couldn't clone generated command sub-command placeholder");
+            sequenceCount = reservedSequenceCount;
+          }
+          else
+          {
+            uint32_t addCount = sequenceCount - reservedSequenceCount;
+            VulkanActionTreeNode node = cmdBufNodes[i + reservedSequenceCount];
+
+            uint32_t baseAddedChunk = (uint32_t)m_StructuredFile->chunks.size();
+            bool duplicateChunks = false;
+            SDChunk *chunk = NULL;
+            if(!node.action.events.empty())
+            {
+              uint32_t chunkIndex = node.action.events.back().chunkIndex;
+              if(chunkIndex < m_StructuredFile->chunks.size())
+              {
+                chunk = m_StructuredFile->chunks[chunkIndex];
+                duplicateChunks = true;
+              }
+            }
+
+            if(duplicateChunks)
+            {
+              m_StructuredFile->chunks.reserve(m_StructuredFile->chunks.size() + addCount);
+              for(uint32_t e = 0; e < addCount; e++)
+                m_StructuredFile->chunks.push_back(chunk->Duplicate());
+            }
+
+            cmdBufNodes.resize(cmdBufNodes.size() + addCount);
+            for(size_t e = cmdBufNodes.size() - 1; e > i + reservedSequenceCount + addCount; e--)
+              cmdBufNodes[e] = std::move(cmdBufNodes[e - addCount]);
+
+            for(uint32_t e = 0; e < addCount; e++)
+            {
+              node.action.eventId++;
+              node.action.actionId++;
+
+              for(APIEvent &ev : node.action.events)
+              {
+                ev.eventId++;
+                if(duplicateChunks)
+                  ev.chunkIndex = baseAddedChunk + e;
+              }
+
+              for(rdcpair<ResourceId, EventUsage> &use : node.resourceUsage)
+                use.second.eventId++;
+
+              cmdBufNodes[i + reservedSequenceCount + 1 + e] = node;
+            }
+          }
+        }
       }
 
       rdcstr actionName = "vkCmdExecuteGeneratedCommandsEXT";
@@ -966,7 +1067,13 @@ void WrappedVulkan::InsertActionsAndRefreshIDs(BakedCmdBufferInfo &cmdBufInfo)
 
         SDChunk *chunk = NULL;
         if(!n2.action.events.empty())
-          chunk = m_StructuredFile->chunks[n2.action.events.back().chunkIndex];
+        {
+          uint32_t chunkIndex = n2.action.events.back().chunkIndex;
+          if(chunkIndex < m_StructuredFile->chunks.size())
+            chunk = m_StructuredFile->chunks[chunkIndex];
+          else
+            RDCERR("Generated command sub-command referenced an invalid structured chunk");
+        }
 
         byte *seqBase = NULL;
         if(ptr && end && j * stride <= (uint64_t)(end - ptr))

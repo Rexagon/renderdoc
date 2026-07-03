@@ -149,6 +149,7 @@ VkGeneratedCommandsPatchData WrappedVulkan::FetchGeneratedCommandsData(
   patch.countBuffer = counterBuffer != VK_NULL_HANDLE ? GetResID(counterBuffer) : ResourceId();
   patch.countOffset = counterOffset;
   patch.hasCount = (counterBuffer != VK_NULL_HANDLE);
+  patch.maxCount = count;
   patch.count = count;
   patch.stride = stride;
 

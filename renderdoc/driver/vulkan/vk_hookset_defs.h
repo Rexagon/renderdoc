@@ -482,6 +482,7 @@
   DeclExt(KHR_device_group);                           \
   DeclExt(MVK_moltenvk);                               \
   DeclExt(KHR_draw_indirect_count);                    \
+  DeclExt(EXT_device_generated_commands);              \
   DeclExt(EXT_validation_cache);                       \
   DeclExt(KHR_shared_presentable_image);               \
   DeclExt(KHR_create_renderpass2);                     \
@@ -630,6 +631,7 @@
   CheckExt(KHR_device_group, VK11);                           \
   CheckExt(MVK_moltenvk, VKXX);                               \
   CheckExt(KHR_draw_indirect_count, VK12);                    \
+  CheckExt(EXT_device_generated_commands, VKXX);              \
   CheckExt(EXT_validation_cache, VKXX);                       \
   CheckExt(KHR_shared_presentable_image, VKXX);               \
   CheckExt(KHR_create_renderpass2, VK12);                     \
@@ -886,6 +888,15 @@
   HookInitExtension(protected_memory, GetDeviceQueue2);                                              \
   HookInitPromotedExtension(KHR_draw_indirect_count, CmdDrawIndirectCount, KHR);                     \
   HookInitPromotedExtension(KHR_draw_indirect_count, CmdDrawIndexedIndirectCount, KHR);              \
+  HookInitExtension(EXT_device_generated_commands, GetGeneratedCommandsMemoryRequirementsEXT);       \
+  HookInitExtension(EXT_device_generated_commands, CmdPreprocessGeneratedCommandsEXT);               \
+  HookInitExtension(EXT_device_generated_commands, CmdExecuteGeneratedCommandsEXT);                  \
+  HookInitExtension(EXT_device_generated_commands, CreateIndirectCommandsLayoutEXT);                 \
+  HookInitExtension(EXT_device_generated_commands, DestroyIndirectCommandsLayoutEXT);                \
+  HookInitExtension(EXT_device_generated_commands, CreateIndirectExecutionSetEXT);                   \
+  HookInitExtension(EXT_device_generated_commands, DestroyIndirectExecutionSetEXT);                  \
+  HookInitExtension(EXT_device_generated_commands, UpdateIndirectExecutionSetPipelineEXT);           \
+  HookInitExtension(EXT_device_generated_commands, UpdateIndirectExecutionSetShaderEXT);             \
   HookInitExtension(EXT_validation_cache, CreateValidationCacheEXT);                                 \
   HookInitExtension(EXT_validation_cache, DestroyValidationCacheEXT);                                \
   HookInitExtension(EXT_validation_cache, MergeValidationCachesEXT);                                 \

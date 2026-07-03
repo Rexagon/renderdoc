@@ -179,6 +179,7 @@ struct VkGeneratedCommandsPatchData
   VkDeviceSize countOffset = 0;
   bool hasCount = false;
 
+  uint32_t maxCount = 0;
   uint32_t count = 0;
   uint32_t stride = 0;
 };
